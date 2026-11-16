@@ -1157,8 +1157,11 @@ function subscriptionPanel(s) {
     const toggle = sub.paused
       ? `<button class="ghost small" data-action="bc-resume" data-id="${esc(sub.id)}">Release${sub.queued ? ` ${sub.queued}` : ''}</button>`
       : `<button class="ghost small" data-action="bc-pause" data-id="${esc(sub.id)}">Pause</button>`;
+    // The id under the endpoint: it is what the platform's own logs and the
+    // vendor's API name the subscription by, and two subscriptions can
+    // share a host.
     return `<tr>
-      <td class="mono">${esc(sub.endpoint)}</td>
+      <td class="mono">${esc(sub.endpoint)}<div class="hint mono">${esc(sub.id)}</div></td>
       <td><div class="pill-row">${events}</div></td>
       <td><div class="pill-row">
         <span class="pill ${sub.status === 'active' ? 'ok' : 'warn'}">${esc(sub.status)}</span>${
@@ -1166,6 +1169,8 @@ function subscriptionPanel(s) {
       <td><div class="pill-row num">${queue}</div></td>
       <td class="actions">${toggle}</td>
       <td class="actions"><button class="ghost small" data-action="bc-test" data-id="${esc(sub.id)}">Send test</button></td>
+      <td class="actions"><button class="danger small" data-action="bc-delete" data-id="${esc(sub.id)}"
+        data-endpoint="${esc(sub.endpoint)}">Delete</button></td>
     </tr>`;
   }).join('');
 
@@ -1191,7 +1196,7 @@ function subscriptionPanel(s) {
     <div class="table-scroll"><table>
       <thead><tr>
         <th>Endpoint</th><th>Events</th><th>Status</th><th class="num">Queue</th>
-        <th class="actions">Delivery</th><th class="actions"></th>
+        <th class="actions">Delivery</th><th class="actions"></th><th class="actions"></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
@@ -3512,6 +3517,15 @@ const ACTIONS = {
       r.released ? `${r.released} notification(s) released to ${r.endpoint}, oldest first.`
                  : `${r.endpoint}\nNothing was waiting.`,
       'good');
+  },
+
+  /* The lab's delete, without the rowVersion the vendor's own wants. The
+     confirm says what it cannot take back and what comes back on its own. */
+  'bc-delete': async (d) => {
+    if (!confirm(`Delete ${d.id}? Banking Circle stops calling ${d.endpoint}, and what is waiting for it is dropped. What it already delivered stays delivered, and a platform that subscribes on boot subscribes again when it next starts — there is no undo.`)) return;
+    const r = await api('DELETE', `/v1/banking-circle/subscriptions/${encodeURIComponent(d.id)}`);
+    toast('Subscription deleted', `${r.endpoint}\n` +
+      (r.dropped ? `${r.dropped} waiting notification(s) dropped with it.` : 'Nothing was waiting for it.'), 'good');
   },
 
   /* Return and reverse are two routes for the same reason pause and release

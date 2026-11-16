@@ -523,10 +523,7 @@ func (s *SubscriptionStore) Delete(id, ifMatch string) error {
 	if err := checkRowVersion(sub.RowVersion, ifMatch); err != nil {
 		return err
 	}
-	for _, e := range sub.Events {
-		delete(s.events, e.ID)
-	}
-	delete(s.subs, id)
+	s.deleteLocked(id)
 	changed(s.OnChange)
 	return nil
 }

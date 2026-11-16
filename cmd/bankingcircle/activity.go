@@ -115,6 +115,28 @@ func (a *app) recordQueued(sub *bankingcircle.Subscription, env bankingcircle.En
 // recordPause logs the switch itself, so the log says who stopped the pipe
 // and when -- without it, a queued line has no beginning and a batch that
 // arrives late has no explanation.
+// recordRemoved files a deleted subscription in the notifications log, the
+// log its deliveries were in: a webhook that stops arriving because nobody
+// is subscribed any more should say so where the deliveries stop.
+func (a *app) recordRemoved(sub *bankingcircle.Subscription, dropped int, by string) {
+	summary := fmt.Sprintf("subscription to %s %s", sub.Endpoint, by)
+	if dropped > 0 {
+		summary += fmt.Sprintf(" — %d notification(s) waiting for it dropped", dropped)
+	}
+	a.notifLog.Record(activity.Event{
+		Env:     sub.Env,
+		Op:      "subscription.delete",
+		Peer:    sub.Endpoint,
+		Status:  activity.StatusWarn,
+		Summary: summary,
+		Detail: nonEmpty(map[string]string{
+			"subscription": sub.ID,
+			"endpoint":     sub.Endpoint,
+			"dropped":      strconv.Itoa(dropped),
+		}),
+	})
+}
+
 func (a *app) recordPause(sub *bankingcircle.Subscription, paused bool, n int) {
 	ev := activity.Event{
 		Env:    sub.Env,

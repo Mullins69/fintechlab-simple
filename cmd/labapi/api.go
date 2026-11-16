@@ -931,6 +931,43 @@ func (a *app) bcSubscriptionPause(w http.ResponseWriter, r *http.Request) {
 	httputilx.WriteJSON(w, 200, out)
 }
 
+// bcSubscriptionDelete removes one of Banking Circle's subscriptions, as
+// its subscriber's DELETE would but without the rowVersion: the lab's
+// override, the way activate and deactivate are. Banking Circle stops
+// calling the endpoint, and what was waiting for it is dropped. A
+// subscription this environment does not have is a 404, Banking Circle's.
+func (a *app) bcSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqContext(r)
+	defer cancel()
+	var out map[string]any
+	if err := a.bc.Delete(ctx, "/sim/subscription/"+url.PathEscape(r.PathValue("id")), &out); err != nil {
+		status := 502
+		if console.RefusedWith(err) == http.StatusNotFound {
+			status = 404
+		}
+		httputilx.Error(w, status, err.Error())
+		return
+	}
+	httputilx.WriteJSON(w, 200, out)
+}
+
+// bcSubscriptionsReset puts the environment's subscriptions back as
+// Banking Circle's start-up left them, and nothing else of the bank's. A
+// subscription now outlives a restart, so a run's are still there for the
+// next run -- a second e2e run's create meets the first one's and gets a
+// 409 -- and this clears them without the reset of scope all, which also
+// empties the ledger and the payments.
+func (a *app) bcSubscriptionsReset(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := reqContext(r)
+	defer cancel()
+	var out map[string]any
+	if err := a.bc.Post(ctx, "/sim/subscriptions/reset", &out); err != nil {
+		httputilx.Error(w, 502, err.Error())
+		return
+	}
+	httputilx.WriteJSON(w, 200, out)
+}
+
 // payoutView is one outgoing payment as the Banking Circle card shows it.
 // CanReturn / CanReverse are decided here, from the vendor's own record, so
 // the page never offers a button the vendor would refuse.

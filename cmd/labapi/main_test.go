@@ -681,6 +681,17 @@ func (f *bcFake) server(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sim/subscription/"):
+			f.calls = append(f.calls, r.Method+" "+r.URL.RequestURI())
+			if r.URL.Path != "/sim/subscription/sub_1" {
+				w.WriteHeader(404)
+				_, _ = w.Write([]byte(`{"error":"subscription not found","status":404}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"subscriptionId":"sub_1","endpoint":"https://receiver:8443/raw-events","deleted":true,"dropped":7}`))
+		case r.URL.Path == "/sim/subscriptions/reset":
+			f.calls = append(f.calls, r.Method+" "+r.URL.RequestURI())
+			_, _ = w.Write([]byte(`{"env":"` + r.URL.Query().Get("env") + `","cleared":{"subscriptions":2,"notifications":4,"pauses":1}}`))
 		case r.URL.Path == "/sim/subscriptions":
 			_, _ = w.Write([]byte(`{"result":[{
 				"id":"sub_1","endpoint":"https://receiver:8443/raw-events","isActive":true,
@@ -1248,5 +1259,50 @@ func TestALabWithNoClockIsOnTheRealTime(t *testing.T) {
 	}
 	if calls != 0 {
 		t.Fatalf("%d calls to a peer for a clock that is not deployed", calls)
+	}
+}
+
+// TestDeleteAndResetAreBankingCirclesOwn. Like the pause, nothing is kept
+// here: one call to the vendor's control port, its answer passed on. An id
+// the bank does not have is its 404, not a gateway failure, so a card that
+// lost a race with another delete says what happened.
+func TestDeleteAndResetAreBankingCirclesOwn(t *testing.T) {
+	fake := &bcFake{}
+	srv := fake.server(t)
+	defer srv.Close()
+	a := testApp(t, srv)
+	a.bc.BaseURL = srv.URL
+
+	w := call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_1", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"dropped":7`) {
+		t.Fatalf("delete = %d %s, want 200 and the bank's own answer", w.Code, w.Body.String())
+	}
+	w = call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_gone", "")
+	if w.Code != 404 || !strings.Contains(w.Body.String(), "subscription not found") {
+		t.Errorf("deleting an id the bank does not have = %d %s, want its 404 in its words", w.Code, w.Body.String())
+	}
+	if w := call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_1?env=*", ""); w.Code != 400 {
+		t.Errorf("a delete in every environment at once = %d, want 400: an id is one environment's", w.Code)
+	}
+
+	w = call(t, a, http.MethodPost, "/v1/banking-circle/subscriptions/reset", "")
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"subscriptions":2`) {
+		t.Fatalf("reset = %d %s, want 200 and what the bank cleared", w.Code, w.Body.String())
+	}
+	if w := call(t, a, http.MethodPost, "/v1/banking-circle/subscriptions/reset?env=*", ""); w.Code != 200 {
+		t.Errorf("a reset of every environment = %d %s, want 200, as the lab's other resets", w.Code, w.Body.String())
+	}
+
+	// Which environment each call names is the control client's transport's
+	// to add (scopeTransport), for every call alike; this fake is not a
+	// control host it knows, so only the calls are checked here.
+	want := []string{
+		"DELETE /sim/subscription/sub_1",
+		"DELETE /sim/subscription/sub_gone",
+		"POST /sim/subscriptions/reset",
+		"POST /sim/subscriptions/reset",
+	}
+	if strings.Join(fake.calls, "\n") != strings.Join(want, "\n") {
+		t.Errorf("the bank was called with\n  %s\nwant\n  %s", strings.Join(fake.calls, "\n  "), strings.Join(want, "\n  "))
 	}
 }

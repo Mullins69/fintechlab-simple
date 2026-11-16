@@ -172,7 +172,27 @@ func (b *BankingCircleBank) Get(ctx context.Context, path string, out any) error
 // Post calls one of Banking Circle's control routes that does something.
 // A refusal comes back in the bank's own words.
 func (b *BankingCircleBank) Post(ctx context.Context, path string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.BaseURL+path, nil)
+	return b.act(ctx, http.MethodPost, path, out)
+}
+
+// Delete calls one of Banking Circle's control routes that removes
+// something, answering as Post does.
+func (b *BankingCircleBank) Delete(ctx context.Context, path string, out any) error {
+	return b.act(ctx, http.MethodDelete, path, out)
+}
+
+// RefusedWith is the status Banking Circle refused a call with, when err is
+// its refusal; 0 when it never answered.
+func RefusedWith(err error) int {
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.code
+	}
+	return 0
+}
+
+func (b *BankingCircleBank) act(ctx context.Context, method, path string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, method, b.BaseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -187,9 +207,9 @@ func (b *BankingCircleBank) Post(ctx context.Context, path string, out any) erro
 		}
 		_ = json.NewDecoder(resp.Body).Decode(&body)
 		if body.Error != "" {
-			return &statusError{resp.StatusCode, fmt.Sprintf("banking-circle POST %s: %s", path, body.Error)}
+			return &statusError{resp.StatusCode, fmt.Sprintf("banking-circle %s %s: %s", method, path, body.Error)}
 		}
-		return &statusError{resp.StatusCode, fmt.Sprintf("banking-circle POST %s: HTTP %d", path, resp.StatusCode)}
+		return &statusError{resp.StatusCode, fmt.Sprintf("banking-circle %s %s: HTTP %d", method, path, resp.StatusCode)}
 	}
 	if out == nil {
 		return nil

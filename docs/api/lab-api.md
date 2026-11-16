@@ -1550,6 +1550,57 @@ the batches it would have gone out in.
 
 **Reaches** — `banking-circle POST /sim/subscription/{id}/resume`.
 
+### `DELETE /v1/banking-circle/subscriptions/{id}`
+
+Delete one subscription: Banking Circle stops calling its endpoint. It is
+the subscriber's own `DELETE` without the `If-Match` the vendor wants, so
+the lab can remove a subscription whatever its `rowVersion`.
+
+**Path parameters** — `id`: a subscription id, the environment's.
+
+**Answers** — `200`, Banking Circle's body:
+`{"subscriptionId": "sub_…", "endpoint": "…", "deleted": true, "dropped": 3}`.
+`dropped` counts the notifications that were waiting for it: in a batch
+filling up, parked behind a pause, or retained after the bank gave up on
+the endpoint. They go with it, and so does a pause. A batch already in its
+retry schedule stops at its next retry. `404` for an id the environment
+does not have, another environment's included; `502` when Banking Circle
+refuses otherwise or is unreachable.
+
+- A platform that subscribes on boot subscribes again when it next
+  starts. The deletion is in the subscription's *Notifications sent* log
+  (`subscription.delete`), and it is written to Banking Circle's state file
+  before the answer, so a restart does not bring it back.
+
+**Reaches** — `banking-circle DELETE /sim/subscription/{id}`.
+
+### `POST /v1/banking-circle/subscriptions/reset`
+
+Put the environment's subscriptions back as Banking Circle started: the
+default environment keeps only the subscription it seeds at start-up, put
+back as it was seeded; another environment keeps none. Nothing else of the
+bank's changes: payments, balances, accounts, tokens, and the notifications
+of a subscription it keeps all stay.
+
+Subscriptions outlive a restart (Banking Circle's state file), so the ones
+a run made are still there for the next run. This clears them without the
+reset of scope `all` (`POST /v1/services/banking-circle/reset`), which also
+empties the ledger. An environment's token resets its own; the admin names
+one, or every one with `*`.
+
+**Answers** — `200`
+
+```json
+{"env": "default", "cleared": {"subscriptions": 2, "notifications": 4, "pauses": 1}}
+```
+
+`subscriptions` counts each one deleted and each seeded one put back
+because it had been deleted or changed since. `notifications` and `pauses`
+are what went with the deleted ones. `502` when Banking Circle refuses or
+is unreachable.
+
+**Reaches** — `banking-circle POST /sim/subscriptions/reset`.
+
 ### `GET /v1/banking-circle/payouts`
 
 Banking Circle's outgoing payments, newest first, with whether each can
