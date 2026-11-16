@@ -381,7 +381,7 @@ cmd_allowed() {
     "nobody -- 'lab.sh allow' adds your address; 'lab.sh console' works without one"
   if [ -n "$(list_id ConsoleListId)" ]; then
     say ""
-    show_list ConsoleListId "the console (and on https) and the vendors' pages (8080-8090) only" \
+    show_list ConsoleListId "the console (and on https) and the vendors' pages (8080-8094) only" \
       "nobody -- 'lab.sh allow --console <ip> <note>' adds someone"
   fi
 }
@@ -465,7 +465,7 @@ DATA_VOLUME_ID='$vol' REGENERATE_KEYS='${REGENERATE_KEYS:-false}' ROTATE_TOKEN='
     check_https "$https"
     check_https "b4b.$https"
     say "console:  https://$https   (and http://$host:8090; from the allowlists -- 'lab.sh allow' adds you; otherwise 'lab.sh console')"
-    say "vendors:  https://<service>.$https -- b4b, banking-circle (mTLS), verification, ...; SFTP stays $host:2222"
+    say "vendors:  https://<service>.$https -- b4b, banking-circle (mTLS), creditsafe, kyc6, lexisnexis, iban-com, ...; SFTP stays $host:2222"
     say "lab API:  https://lab-api.$https/v1 (and http://$host:8097/v1) with its token ('lab.sh token'): FINTECH_SIM_LAB_URL, FINTECH_SIM_LAB_TOKEN"
   else
     say "console:  http://$host:8090   (from the allowlist -- 'lab.sh allow' adds you; otherwise 'lab.sh console')"
