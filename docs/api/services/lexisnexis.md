@@ -184,10 +184,10 @@ the `respond` effect ([§4.3](../../lab-api/traps.md#43-respond-answering-a-vend
             "effect": "respond"}]}
 ```
 
-A request is the environment its credentials name: its bearer token's or
-its `x-api-key`'s. A login sent in the body (`/creditsafe/authenticate`,
-`/lexisnexis/oauth/token`, IVI) is the default environment's. `/health`
-and the `/sim/*` paths are never caught.
+A request is the environment its credentials name: the `client_id` and
+`client_secret` in the OAuth body, the `api_key` in IVI's, or the bearer
+token the OAuth call issued. `/health` and the `/sim/*` paths are never
+caught.
 
 ### `GET /sim/traps`
 

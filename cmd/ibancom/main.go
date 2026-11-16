@@ -5,10 +5,10 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/webduvet/fintechlab-simple/internal/activity"
 	"log"
 	"net/http"
 
+	"github.com/webduvet/fintechlab-simple/internal/activity"
 	"github.com/webduvet/fintechlab-simple/internal/httputilx"
 	"github.com/webduvet/fintechlab-simple/internal/vendorsim"
 )

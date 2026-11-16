@@ -123,3 +123,27 @@ func TestPortfolioIdsSurviveAFlowResetAndRestartOnAnAllReset(t *testing.T) {
 		t.Errorf("after an all reset: portfolio %v, want 1", id)
 	}
 }
+
+func TestALoginTrapActsInTheEnvironmentTheLoginNames(t *testing.T) {
+	svc, ctl := surfaces(t)
+	vendorsimtest.Call(t, ctl, "PUT", "/sim/customers/sbx", `{"env":"sbx","verification":{"username":"sbx-user","password":"sbx-secret"}}`, nil)
+	sbxLogin := `{"username":"sbx-user","password":"sbx-secret"}`
+	defaultLogin := `{"username":"u","password":"p"}`
+
+	if code, out := vendorsimtest.Call(t, ctl, "POST", "/sim/traps?env=sbx", `{"hook":"http.request","match":{"path":"/creditsafe/authenticate"},"effect":{"respond":{"status":503}},"times":null}`, nil); code != 201 {
+		t.Fatalf("arm in sbx: %d %v", code, out)
+	}
+	if code, _ := vendorsimtest.Call(t, svc, "POST", "/creditsafe/authenticate", sbxLogin, nil); code != 503 {
+		t.Errorf("sbx login with a trap in sbx: %d, want 503", code)
+	}
+	if code, _ := vendorsimtest.Call(t, svc, "POST", "/creditsafe/authenticate", defaultLogin, nil); code != 200 {
+		t.Errorf("default login with a trap in sbx: %d, want 200", code)
+	}
+
+	svc, ctl = surfaces(t)
+	vendorsimtest.Call(t, ctl, "PUT", "/sim/customers/sbx", `{"env":"sbx","verification":{"username":"sbx-user","password":"sbx-secret"}}`, nil)
+	vendorsimtest.Call(t, ctl, "POST", "/sim/traps", `{"hook":"http.request","match":{"path":"/creditsafe/authenticate"},"effect":{"respond":{"status":503}},"times":null}`, nil)
+	if code, out := vendorsimtest.Call(t, svc, "POST", "/creditsafe/authenticate", sbxLogin, nil); code != 200 || out["token"] == nil {
+		t.Errorf("sbx login with a trap in the default environment: %d %v, want a token", code, out)
+	}
+}

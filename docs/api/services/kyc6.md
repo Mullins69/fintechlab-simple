@@ -172,10 +172,8 @@ the `respond` effect ([§4.3](../../lab-api/traps.md#43-respond-answering-a-vend
             "effect": "respond"}]}
 ```
 
-A request is the environment its credentials name: its bearer token's or
-its `x-api-key`'s. A login sent in the body (`/creditsafe/authenticate`,
-`/lexisnexis/oauth/token`, IVI) is the default environment's. `/health`
-and the `/sim/*` paths are never caught.
+A request is the environment its `x-api-key` names. `/health` and the
+`/sim/*` paths are never caught.
 
 ### `GET /sim/traps`
 

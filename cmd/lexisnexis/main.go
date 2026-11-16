@@ -22,6 +22,7 @@ func newApp(addr string) (*app, error) {
 	sim, err := vendorsim.New(vendorsim.Config{
 		Service: "lexisnexis", Simulates: "LexisNexis",
 		Checks: []vendorsim.Check{{Name: checkIdentity, Outcomes: []string{"pass", "refer", "fail"}}},
+		EnvOf:  a.envOf,
 	}, addr)
 	if err != nil {
 		return nil, err
@@ -40,6 +41,26 @@ func main() {
 		log.Fatalf("lexisnexis: %v", err)
 	}
 	a.sim.Run(addr)
+}
+
+// envOf is the environment a request whose credentials are in its body logs
+// in as: the OAuth client id and secret, or the IVI api_key.
+func (a *app) envOf(r *http.Request, body []byte) string {
+	var credentials struct {
+		ClientID     string `json:"client_id"`
+		ClientSecret string `json:"client_secret"`
+		APIKey       string `json:"api_key"`
+	}
+	switch r.URL.Path {
+	case "/lexisnexis/oauth/token":
+		_ = json.Unmarshal(body, &credentials)
+		env, _ := a.sim.ByLogin(credentials.ClientID, credentials.ClientSecret)
+		return env
+	case "/lexisnexis/ivi/api/attribute-query":
+		_ = json.Unmarshal(body, &credentials)
+		return a.sim.ByKey(credentials.APIKey)
+	}
+	return ""
 }
 
 func (a *app) token(w http.ResponseWriter, r *http.Request) {

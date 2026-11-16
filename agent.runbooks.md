@@ -26,7 +26,8 @@ checkout.
 | banking-circle bridge | 8095 | plain HTTP, no auth: `/internal/*` lab hooks |
 | worldline | 8084, 2222 | SFT channel over HTTP; SFTP+PGP on 2222 |
 | b4b | 8086 | Oversight API (RS512 JWT) |
-| aci / verify / verification | 8087 / 8088 / 8089 | |
+| aci / verify | 8087 / 8088 | |
+| creditsafe / kyc6 / lexisnexis / iban-com | 8091 / 8092 / 8093 / 8094 | the verification vendors, one sim each |
 | bank / settlement / receiver | 8081 / 8083 / 8443 | the bank is a vendor; settlement and receiver are stand-ins |
 | *every service's control port* | its port + 1000 (9081–9096, 9443) | `/sim/*` and `GET /health`, plain HTTP, no vendor login; not published by compose — reach it through the lab API's `/v1/services/<id>/sim/…` |
 | **clock** | 8096 | the lab's business clock: `GET/POST /clock`, `/clock/holds` |

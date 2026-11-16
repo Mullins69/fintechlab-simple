@@ -1,20 +1,26 @@
 package main
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/webduvet/fintechlab-simple/internal/vendorsim/vendorsimtest"
 )
 
-func TestIdentityFollowsTheIdentityOutcome(t *testing.T) {
+func surfaces(t *testing.T) (svc, ctl http.Handler) {
+	t.Helper()
 	t.Setenv("SIM_CONTROL_LISTEN", "")
 	t.Setenv("SIM_CONTROL_ALLOW", "")
 	a, err := newApp(":8093")
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc, control := a.sim.Surfaces()
-	ctl := control.Handler()
+	vendor, control := a.sim.Surfaces()
+	return vendor, control.Handler()
+}
+
+func TestIdentityFollowsTheIdentityOutcome(t *testing.T) {
+	svc, ctl := surfaces(t)
 
 	code, out := vendorsimtest.Call(t, svc, "POST", "/lexisnexis/oauth/token", `{"client_id":"c","client_secret":"s"}`, nil)
 	tok, _ := out["access_token"].(string)
@@ -49,5 +55,32 @@ func TestIdentityFollowsTheIdentityOutcome(t *testing.T) {
 	}
 	if code, _ := vendorsimtest.Call(t, svc, "POST", "/lexisnexis/idu/v1/reports", `{}`, nil); code != 401 {
 		t.Errorf("IDU without a token: %d, want 401", code)
+	}
+}
+
+func TestTrapsOnTheTokenAndIVIActInTheEnvironmentTheBodyNames(t *testing.T) {
+	routes := map[string][2]string{
+		"/lexisnexis/oauth/token":             {`{"client_id":"sbx-user","client_secret":"sbx-secret"}`, `{"client_id":"c","client_secret":"s"}`},
+		"/lexisnexis/ivi/api/attribute-query": {`{"org_id":"o","api_key":"sbx-secret","policy":"p"}`, `{"org_id":"o","api_key":"k","policy":"p"}`},
+	}
+	for path, bodies := range routes {
+		sbxBody, defaultBody := bodies[0], bodies[1]
+		for _, armedIn := range []string{"sbx", "default"} {
+			svc, ctl := surfaces(t)
+			vendorsimtest.Call(t, ctl, "PUT", "/sim/customers/sbx", `{"env":"sbx","verification":{"username":"sbx-user","password":"sbx-secret"}}`, nil)
+			if code, out := vendorsimtest.Call(t, ctl, "POST", "/sim/traps?env="+armedIn, `{"hook":"http.request","match":{"path":"`+path+`"},"effect":{"respond":{"status":503}},"times":null}`, nil); code != 201 {
+				t.Fatalf("arm in %s: %d %v", armedIn, code, out)
+			}
+			wantSbx, wantDefault := 503, 200
+			if armedIn == "default" {
+				wantSbx, wantDefault = 200, 503
+			}
+			if code, _ := vendorsimtest.Call(t, svc, "POST", path, sbxBody, nil); code != wantSbx {
+				t.Errorf("%s as sbx, trap in %s: %d, want %d", path, armedIn, code, wantSbx)
+			}
+			if code, _ := vendorsimtest.Call(t, svc, "POST", path, defaultBody, nil); code != wantDefault {
+				t.Errorf("%s as the default, trap in %s: %d, want %d", path, armedIn, code, wantDefault)
+			}
+		}
 	}
 }

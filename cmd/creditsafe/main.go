@@ -68,6 +68,7 @@ func newApp(addr string) (*app, error) {
 		Kept:   []string{"portfolios"},
 		Reset:  a.reset,
 		Forget: a.forget,
+		EnvOf:  a.envOf,
 	}, addr)
 	if err != nil {
 		return nil, err
@@ -169,6 +170,21 @@ func (a *app) registerCompany(w http.ResponseWriter, r *http.Request) {
 	a.mu.Unlock()
 	log.Printf("creditsafe: company %s registered in environment %s", id, env)
 	httputilx.WriteJSON(w, 200, map[string]any{"env": env, "id": id, "company": c})
+}
+
+// envOf is the environment POST /creditsafe/authenticate logs in as: its
+// body carries the username and password.
+func (a *app) envOf(r *http.Request, body []byte) string {
+	if r.URL.Path != "/creditsafe/authenticate" {
+		return ""
+	}
+	var login struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	_ = json.Unmarshal(body, &login)
+	env, _ := a.sim.ByLogin(login.Username, login.Password)
+	return env
 }
 
 func (a *app) authenticate(w http.ResponseWriter, r *http.Request) {

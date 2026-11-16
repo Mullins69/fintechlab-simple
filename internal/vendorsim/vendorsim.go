@@ -19,8 +19,10 @@
 package vendorsim
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -64,6 +66,10 @@ type Config struct {
 	// method and path, and a 4xx's error) misses a refusal of the vendor's
 	// own shape.
 	Summarize activity.Summarizer
+	// EnvOf is the environment a request's body logs in as, for a vendor
+	// whose login or key travels in the body, so that a trap acts in that
+	// environment; "" leaves it to the bearer token or the x-api-key.
+	EnvOf func(r *http.Request, body []byte) string
 }
 
 // Sim is one vendor's sim: its two surfaces and the lab state they share.
@@ -434,13 +440,27 @@ func (s *Sim) faults(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		env := s.envOfCredentials(r)
+		env := s.envOf(r)
 		tenant.Set(r.Context(), env)
 		if s.traps.Intercept(w, r, env) {
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// envOf is the environment a request's credentials name: its body's login,
+// when the vendor reads one there, else its bearer token or x-api-key. The
+// handler still reads the whole body.
+func (s *Sim) envOf(r *http.Request) string {
+	if s.cfg.EnvOf != nil {
+		body, _ := io.ReadAll(r.Body)
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if env := s.cfg.EnvOf(r, body); env != "" {
+			return env
+		}
+	}
+	return s.envOfCredentials(r)
 }
 
 func (s *Sim) envOfCredentials(r *http.Request) string {
