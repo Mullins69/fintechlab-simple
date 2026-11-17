@@ -1,7 +1,9 @@
 package bankingcircle
 
 import (
+	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -55,6 +57,61 @@ func TestTheLabRemovesASubscriptionWithWhatWasWaitingForIt(t *testing.T) {
 	}
 	if _, err := b.subs.Get(b.seed.ID); err != nil {
 		t.Errorf("deleting one subscription took another with it: %v", err)
+	}
+}
+
+func TestDeletingASubscriptionEndsItsRelease(t *testing.T) {
+	b := newTestBank(t, time.Hour, quiet())
+	// Twenty parked, released as four batches of five.
+	platform := subscribeEverything(t, b.subs, "https://example.test/platform", 5)
+	b.disp.Pause(platform.ID)
+	for i := range 20 {
+		b.disp.Enqueue(platform, Notification{EventID: string(rune('a' + i))})
+	}
+
+	// The release's first batch hangs on the wire until the delete is done.
+	onTheWire, letGo := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	sent := 0
+	b.disp.Send = func(context.Context, *Subscription, Envelope) error {
+		mu.Lock()
+		sent++
+		first := sent == 1
+		mu.Unlock()
+		if first {
+			close(onTheWire)
+			<-letGo
+		}
+		return nil
+	}
+	if released := b.disp.Resume(platform); released != 20 {
+		t.Fatalf("released %d, want the 20 parked", released)
+	}
+	select {
+	case <-onTheWire:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the release never sent its first batch")
+	}
+
+	_, dropped, err := b.bank.RemoveSubscription(tenant.Default, platform.ID, nil)
+	close(letGo)
+	if err != nil {
+		t.Fatalf("the lab's delete: %v", err)
+	}
+	within(t, 2*time.Second, "the release", b.disp.Wait)
+	mu.Lock()
+	defer mu.Unlock()
+	if sent != 1 {
+		t.Errorf("%d batches reached the deleted subscription's endpoint, want only the one already on the wire", sent)
+	}
+	if dropped != 20 {
+		t.Errorf("dropped %d, want 20: the batch on the wire and the three behind it", dropped)
+	}
+	b.disp.mu.Lock()
+	inflight := len(b.disp.inflight)
+	b.disp.mu.Unlock()
+	if inflight != 0 {
+		t.Errorf("%d batch(es) still counted on their way out to a deleted subscription", inflight)
 	}
 }
 
@@ -131,5 +188,32 @@ func TestResettingSubscriptionsPutsBackTheSeedAndNothingElse(t *testing.T) {
 	}
 	if _, err := b.subs.GetIn("sbx", sbx.ID); !errors.Is(err, ErrSubscriptionNotFound) {
 		t.Errorf("sbx's subscription survived sbx's reset: %v", err)
+	}
+}
+
+func TestResettingSubscriptionsPutsTheSeedBackWithNothingHeld(t *testing.T) {
+	b := newTestBank(t, time.Hour, quiet())
+	// What a run leaves on the seed: one notification batching (quiet's
+	// flush waits an hour), two parked behind a pause, and three retained
+	// after the retry schedule gave up.
+	b.disp.Enqueue(b.seed, Notification{EventID: "batching"})
+	b.disp.Pause(b.seed.ID)
+	b.disp.Enqueue(b.seed, Notification{EventID: "parked-1"})
+	b.disp.Enqueue(b.seed, Notification{EventID: "parked-2"})
+	b.disp.retain(b.seed, []Notification{{EventID: "r1"}, {EventID: "r2"}, {EventID: "r3"}})
+
+	cleared := b.bank.ResetSubscriptions(tenant.Default)
+	if cleared["notifications"] != 5 || cleared["pauses"] != 1 {
+		t.Errorf("cleared %v, want the seed's 5 parked and retained notifications and its pause", cleared)
+	}
+	if b.disp.Paused(b.seed.ID) || b.disp.Queued(b.seed.ID) != 0 || b.disp.Pending(b.seed.ID) != 0 {
+		t.Errorf("the seed came back holding paused=%v queued=%d pending=%d, want nothing",
+			b.disp.Paused(b.seed.ID), b.disp.Queued(b.seed.ID), b.disp.Pending(b.seed.ID))
+	}
+	b.disp.mu.Lock()
+	batching := len(b.disp.queues[b.seed.ID].items)
+	b.disp.mu.Unlock()
+	if batching != 1 {
+		t.Errorf("%d notification(s) batching for the seed, want its 1 still on its way", batching)
 	}
 }

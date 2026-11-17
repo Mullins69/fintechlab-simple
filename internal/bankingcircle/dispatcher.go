@@ -276,39 +276,29 @@ func (d *Dispatcher) deliverSync(sub *Subscription, batch []Notification, starte
 
 	env := Envelope{Notifications: batch}
 
-	var err error
-	if !d.run.Do(sub.Env, started, func(ctx context.Context) {
-		if err = d.Send(ctx, sub, env); err == nil {
-			d.land(f)
-		}
-	}) {
-		return
-	}
-	if err == nil {
-		d.logf("banking-circle: delivered %d notification(s) to %s on the first attempt", len(batch), sub.Endpoint)
-		return
-	}
-	d.logf("banking-circle: initial delivery to %s failed: %v", sub.Endpoint, err)
-
-	for retry := 1; ; retry++ {
-		wait, ok := d.cfg.Wait(retry)
-		if !ok {
-			break
-		}
-		if !d.run.Sleep(sub.Env, started, wait) {
-			return
+	// Attempt 0 is the first delivery; the rest are the retry schedule.
+	for retry := 0; ; retry++ {
+		if retry > 0 {
+			wait, ok := d.cfg.Wait(retry)
+			if !ok {
+				break
+			}
+			if !d.run.Sleep(sub.Env, started, wait) {
+				return
+			}
 		}
 
+		var err error
 		gone := false
 		if !d.run.Do(sub.Env, started, func(ctx context.Context) {
-			// A subscription deleted mid-schedule has nothing left to
-			// retry against.
+			// A subscription deleted since has nothing left to send to:
+			// mid-schedule, or before a release reached this batch.
 			if _, gerr := d.subs.Get(sub.ID); gerr != nil {
 				gone = true
 				d.land(f)
 				return
 			}
-			if kind := d.cfg.EmailFor(retry); kind != "" {
+			if kind := d.cfg.EmailFor(retry); kind != "" { // none for the first attempt
 				d.sendEmail(sub, kind, retry)
 			}
 			if err = d.Send(ctx, sub, env); err == nil {
@@ -317,15 +307,21 @@ func (d *Dispatcher) deliverSync(sub *Subscription, batch []Notification, starte
 		}) {
 			return
 		}
-		if gone {
-			d.logf("banking-circle: subscription %s disappeared mid-retry, abandoning %d notification(s)", sub.ID, len(batch))
+		switch {
+		case gone:
+			d.logf("banking-circle: subscription %s is gone, abandoning %d notification(s)", sub.ID, len(batch))
 			return
-		}
-		if err == nil {
+		case err == nil && retry == 0:
+			d.logf("banking-circle: delivered %d notification(s) to %s on the first attempt", len(batch), sub.Endpoint)
+			return
+		case err == nil:
 			d.logf("banking-circle: delivered %d notification(s) to %s on retry %d", len(batch), sub.Endpoint, retry)
 			return
+		case retry == 0:
+			d.logf("banking-circle: initial delivery to %s failed: %v", sub.Endpoint, err)
+		default:
+			d.logf("banking-circle: retry %d to %s failed: %v", retry, sub.Endpoint, err)
 		}
-		d.logf("banking-circle: retry %d to %s failed: %v", retry, sub.Endpoint, err)
 	}
 
 	// Schedule exhausted. Deactivate, and hold on to the notifications:
@@ -461,7 +457,9 @@ func (d *Dispatcher) Resume(sub *Subscription) int {
 	go func() {
 		for i, batch := range batches {
 			// A reset ends the release: the batches still to go belong to
-			// the run it ended, and are counted by it.
+			// the run it ended, and are counted by it. Deleting the
+			// subscription ends it too: each batch still to go finds it
+			// gone (deliverSync).
 			if !d.run.Moved(sub.Env, started) {
 				d.deliverSync(sub, batch, started, flights[i])
 			}

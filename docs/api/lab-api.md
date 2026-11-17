@@ -1560,10 +1560,12 @@ the lab can remove a subscription whatever its `rowVersion`.
 
 **Answers** — `200`, Banking Circle's body:
 `{"subscriptionId": "sub_…", "endpoint": "…", "deleted": true, "dropped": 3}`.
-`dropped` counts the notifications that were waiting for it: in a batch
-filling up, parked behind a pause, or retained after the bank gave up on
-the endpoint. They go with it, and so does a pause. A batch already in its
-retry schedule stops at its next retry. `404` for an id the environment
+`dropped` counts the notifications Banking Circle had not delivered to
+it: in a batch filling up, parked behind a pause, retained after the bank
+gave up on the endpoint, or on their way out. They go with it, and so does
+a pause. A batch on its way out stops at its next attempt, in its retry
+schedule or waiting its turn in a release; only a send already on the wire
+finishes, and it is counted in `dropped` though it may still arrive. `404` for an id the environment
 does not have, another environment's included; `502` when Banking Circle
 refuses otherwise or is unreachable.
 
@@ -1578,9 +1580,10 @@ refuses otherwise or is unreachable.
 
 Put the environment's subscriptions back as Banking Circle started: the
 default environment keeps only the subscription it seeds at start-up, put
-back as it was seeded; another environment keeps none. Nothing else of the
-bank's changes: payments, balances, accounts, tokens, and the notifications
-of a subscription it keeps all stay.
+back as it was seeded; another environment keeps none. The seeded one comes
+back not paused, with nothing parked behind a pause and nothing retained
+after a deactivation; what it was already sending still goes. Nothing else
+of the bank's changes: payments, balances, accounts and tokens all stay.
 
 Subscriptions outlive a restart (Banking Circle's state file), so the ones
 a run made are still there for the next run. This clears them without the
@@ -1596,7 +1599,7 @@ one, or every one with `*`.
 
 `subscriptions` counts each one deleted and each seeded one put back
 because it had been deleted or changed since. `notifications` and `pauses`
-are what went with the deleted ones. `502` when Banking Circle refuses or
+are what went with the deleted ones and what the seeded one held. `502` when Banking Circle refuses or
 is unreachable.
 
 **Reaches** — `banking-circle POST /sim/subscriptions/reset`.

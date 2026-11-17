@@ -345,10 +345,11 @@ Removes a subscription and its events. Irreversible.
 
 - Headers: `If-Match: <rowVersion>`.
 - Answers `200` with an empty body. `404`; `412`.
-- Side effects: a batch already in its retry schedule is abandoned at the
-  next retry. What the bank held for the subscription is dropped with it:
-  the batch filling up, what a pause parked and the pause, and what it
-  retained. `subscription.delete` in the `notifications` log.
+- Side effects: a batch on its way out stops at its next attempt, in its
+  retry schedule or waiting its turn in a release; only a send already on
+  the wire finishes. What the bank held for the subscription is dropped
+  with it: the batch filling up, what a pause parked and the pause, and
+  what it retained. `subscription.delete` in the `notifications` log.
 
 ### `POST /api/v1/notificationselfservice/subscriptionEvent`
 
@@ -1172,8 +1173,10 @@ with the subscription, as the vendor's does; `404`; never `412`.
 
 - Side effects: the vendor's, and what the bank held for the subscription
   goes with it: the batch filling up, what a pause parked and the pause,
-  and what it retained after the retry schedule gave up. `dropped` counts
-  those notifications. `subscription.delete` in the `notifications` log.
+  what it retained after the retry schedule gave up, and the batches on
+  their way out, which stop at their next attempt. `dropped` counts those
+  notifications, a batch on the wire at that moment included (it may still
+  arrive). `subscription.delete` in the `notifications` log.
   The state file is written before it answers. The vendor's own `DELETE`
   drops the same and logs it too.
 
@@ -1187,11 +1190,14 @@ all deleted. `?env=*` resets every environment's.
 - Answers `200` `{"env": "default", "cleared": {"subscriptions": 2, "notifications": 4, "pauses": 1}}`.
   `subscriptions` counts each one deleted and each seeded one put back
   because it had been deleted or written to since; `notifications` and
-  `pauses` are what went with the deleted ones.
+  `pauses` are what went with the deleted ones and what the seeded one
+  held.
 - Side effects: as `DELETE /sim/subscription/{subscriptionId}` for each one
-  deleted, without the log entries. Payments, balances, accounts, tokens
-  and the notifications of the subscriptions kept do not change. The state
-  file is written before it answers.
+  deleted, without the log entries. The seeded one comes back as start-up
+  left it: not paused, nothing parked behind a pause, nothing retained
+  after a deactivation. Its batch filling up and its batches on their way
+  out still go. Payments, balances, accounts and tokens do not change. The
+  state file is written before it answers.
 
 ### `GET /accounts`
 
