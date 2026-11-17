@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -39,6 +42,31 @@ func bambora(t *testing.T, currency, mid string) []byte {
 type fakeWorldline struct {
 	mu        sync.Mutex
 	published []string // env/name?wire
+	// sizes is how many bytes each publish carried, in order.
+	sizes []int64
+	// bigTxns, when set, makes render answer a file of that many
+	// transactions; slow holds each answer back that long.
+	bigTxns int
+	slow    time.Duration
+}
+
+// settings is what the test set, read under the lock.
+func (wl *fakeWorldline) settings() (int, time.Duration) {
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	return wl.bigTxns, wl.slow
+}
+
+// countingReader counts what is read through it.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
 }
 
 func newFilesApp(t *testing.T) (*app, *fakeWorldline) {
@@ -58,18 +86,38 @@ func newFilesApp(t *testing.T) (*app, *fakeWorldline) {
 			httputilx.Error(w, 404, "nothing settles in USD")
 			return
 		}
-		httputilx.WriteJSON(w, 200, map[string]any{
-			"name": tenant.FromRequest(r) + "_ER_" + b.Currency + ".csv", "content": string(bambora(t, b.Currency, "MID-"+tenant.FromRequest(r))),
-		})
+		// As Worldline answers a caller that asks for the file itself.
+		if r.Header.Get("Accept") != "text/csv" {
+			t.Errorf("render asked for %q, want the file itself (text/csv)", r.Header.Get("Accept"))
+		}
+		big, slow := wl.settings()
+		time.Sleep(slow)
+		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
+		w.Header().Set("Lab-File-Name", tenant.FromRequest(r)+"_ER_"+b.Currency+".csv")
+		if big == 0 {
+			_, _ = w.Write(bambora(t, b.Currency, "MID-"+tenant.FromRequest(r)))
+			return
+		}
+		txns := make([]worldline.Transaction, big)
+		for i := range txns {
+			txns[i] = worldline.Transaction{ID: strconv.Itoa(i), MID: fmt.Sprintf("MID-%03d", i%200), Currency: b.Currency, AmountCents: int64(1000 + i%5000), Date: "2026-11-09"}
+		}
+		bw := bufio.NewWriterSize(w, 1<<16)
+		_ = worldline.GenerateSettlementFile(txns, b.Currency, "2026-11-09", "2026-11-09", worldline.BamboraOptions{}).WriteCSV(bw)
+		_ = bw.Flush()
 	})
 	mux.HandleFunc("POST /sim/settlement-files/publish", func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if _, err := worldline.ParseBamboraCSV(bytes.NewReader(body)); err != nil {
+		// Read as it comes, as Worldline reads it, counting the bytes.
+		n := &countingReader{r: r.Body}
+		if _, err := worldline.SummarizeSettlementFile(n); err != nil {
 			httputilx.Error(w, 400, err.Error())
 			return
 		}
+		_, slow := wl.settings()
+		time.Sleep(slow)
 		wl.mu.Lock()
 		wl.published = append(wl.published, tenant.FromRequest(r)+"/"+r.URL.Query().Get("name")+"?"+r.URL.Query().Get("wire"))
+		wl.sizes = append(wl.sizes, n.n)
 		wl.mu.Unlock()
 		httputilx.WriteJSON(w, 201, map[string]any{"published": "/download/" + r.URL.Query().Get("name") + ".pgp"})
 	})
@@ -309,5 +357,50 @@ func TestAnEnvironmentsFileDownloadsWhole(t *testing.T) {
 	}
 	if w := as(t, a, token, "GET", "/v1/settlement-files/download?name=../../etc/passwd", ""); w.Code != 400 {
 		t.Errorf("a path: %d", w.Code)
+	}
+}
+
+// A file over 64 MiB is cut into the environment's files and published at
+// Worldline: the lab API streams it both ways, holds none of it, and gives
+// a file's call the time it takes, not a JSON call's seconds. Before, the
+// cut's answer was read up to 64 MiB and no further, and every call was
+// cut off at the plain client's timeout.
+func TestAFileOverTheOld64MiBIsCutAndPublishedThroughTheLabAPI(t *testing.T) {
+	if testing.Short() {
+		t.Skip("cuts and publishes a file of over 64 MiB")
+	}
+	a, wl := newFilesApp(t)
+	_, token := createEnvOnly(t, a, `{"id": "sbx"}`)
+	wl.mu.Lock()
+	wl.bigTxns, wl.slow = 210_000, 300*time.Millisecond
+	wl.mu.Unlock()
+	// Shorter than either answer: only a call that is not bound by the
+	// plain client's timeout gets through.
+	a.client.Timeout = 100 * time.Millisecond
+
+	w := as(t, a, token, "POST", "/v1/settlement-files/cut", `{"currency": "EUR"}`)
+	if w.Code != 201 {
+		t.Fatalf("cut: %d %s", w.Code, w.Body)
+	}
+	var cut struct{ File settlementFile }
+	if err := json.Unmarshal(w.Body.Bytes(), &cut); err != nil {
+		t.Fatal(err)
+	}
+	if cut.File.Bytes <= 64<<20 || cut.File.Problem != "" || cut.File.Items != 210_000 {
+		t.Fatalf("the cut: %d bytes, %d items, problem %q: want over 64 MiB, whole", cut.File.Bytes, cut.File.Items, cut.File.Problem)
+	}
+	dir := a.filesDir(tenant.With(context.Background(), "sbx"), sourceCut)
+	if entries, _ := os.ReadDir(dir); len(entries) != 1 {
+		t.Errorf("the cut folder holds %d entries, want the one file and nothing partial", len(entries))
+	}
+
+	w = as(t, a, token, "POST", "/v1/settlement-files/publish", `{"files": ["`+cut.File.Name+`"], "wire": false}`)
+	if w.Code != 200 || !strings.Contains(w.Body.String(), `"published":1`) {
+		t.Fatalf("publish: %d %s", w.Code, w.Body)
+	}
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	if len(wl.sizes) != 1 || wl.sizes[0] != cut.File.Bytes {
+		t.Errorf("Worldline was sent %v bytes, want %d", wl.sizes, cut.File.Bytes)
 	}
 }

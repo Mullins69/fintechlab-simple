@@ -405,7 +405,12 @@ type SettlementSummary struct {
 
 // SummarizeSettlementFile reads a settlement file row by row and keeps only
 // its summary, so a file of millions of transactions costs a pass over the
-// disk, not its size in memory. It refuses what ParseSettlementFile refuses.
+// disk, not its size in memory. It refuses what ParseSettlementFile refuses,
+// with the same reasons: each row is read by the same row parsers, and a
+// TXER row needs a batch row before it. The one difference is the legacy
+// format's minor units, which it takes from the Settlement row when it
+// reaches it rather than from a first pass over the whole file -- every
+// file this lab or Worldline writes puts that row first.
 func SummarizeSettlementFile(r io.Reader) (SettlementSummary, error) {
 	cr := csv.NewReader(bufio.NewReaderSize(r, 1<<16))
 	cr.FieldsPerRecord = -1 // sections have different widths
@@ -435,11 +440,17 @@ func SummarizeSettlementFile(r io.Reader) (SettlementSummary, error) {
 			}
 			s.Meta, settlement = m, true
 		case bamboraRecordTypeBatch:
+			if _, err := parseBatchRow(row, amounts); err != nil {
+				return s, fmt.Errorf("worldline: batch row %d: %w", i, err)
+			}
 			s.Batches++
 		case bamboraRecordTypeTXER:
 			t, err := parseTXERRow(row, amounts)
 			if err != nil {
 				return s, fmt.Errorf("worldline: TXER row %d: %w", i, err)
+			}
+			if s.Batches == 0 {
+				return s, fmt.Errorf("worldline: TXER row %d appears before any batch row", i)
 			}
 			s.Transactions++
 			if _, ok := seen[t.AdditionalRef2]; !ok {
@@ -447,14 +458,17 @@ func SummarizeSettlementFile(r io.Reader) (SettlementSummary, error) {
 				s.MIDs = append(s.MIDs, t.AdditionalRef2)
 			}
 		case bamboraRecordTypeCB:
+			if _, err := parseCBRow(row, amounts); err != nil {
+				return s, fmt.Errorf("worldline: CB row %d: %w", i, err)
+			}
 			s.Chargebacks++
 		}
 	}
 	if !settlement {
-		return s, errors.New("worldline: no Settlement row: not a Worldline settlement file")
+		return s, fmt.Errorf("worldline: not a settlement file: it has no %q row", bamboraRecordTypeSettlement)
 	}
 	if s.Meta.SettlementCurrency == "" {
-		return s, errors.New("worldline: the Settlement row names no currency")
+		return s, fmt.Errorf("worldline: not a settlement file: its %s row names no SETTLEMENT_CURRENCY", bamboraRecordTypeSettlement)
 	}
 	sort.Strings(s.MIDs)
 	return s, nil

@@ -1,8 +1,10 @@
 package wlsftp
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -24,16 +26,63 @@ import (
 // to_WLNORDIC/): the same content is reachable under either, which is what
 // a real Worldline SFT account exposes.
 func Publish(root, filename string, body []byte) (string, error) {
+	return PublishFrom(root, filename, bytes.NewReader(body))
+}
+
+// PublishFrom is Publish for a file read from src, which it reads from the
+// start once per folder: a file of hundreds of megabytes goes from disk to
+// disk and is never held whole.
+//
+// Each copy is written under a hidden name beside its final one and
+// renamed into place when it is whole, so a platform polling mid-publish
+// sees the file complete or not at all -- never the first half of it,
+// which is what a large file written in place would offer.
+func PublishFrom(root, filename string, src io.ReadSeeker) (string, error) {
 	for _, d := range []string{DirDownload, DirToWLNordic} {
 		dir := filepath.Join(root, filepath.FromSlash(d))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", fmt.Errorf("wlsftp: create %s: %w", dir, err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, filename), body, 0o644); err != nil {
-			return "", fmt.Errorf("wlsftp: write %s: %w", filepath.Join(dir, filename), err)
+		if _, err := src.Seek(0, io.SeekStart); err != nil {
+			return "", fmt.Errorf("wlsftp: rewind %s: %w", filename, err)
+		}
+		if err := writeWhole(dir, filename, src); err != nil {
+			return "", err
 		}
 	}
 	return filename, nil
+}
+
+// writeWhole writes src to dir/filename by way of a hidden partial file in
+// dir, renamed over filename once it is complete.
+func writeWhole(dir, filename string, src io.Reader) error {
+	final := filepath.Join(dir, filename)
+	tmp, err := os.CreateTemp(dir, "."+filename+".*.partial")
+	if err != nil {
+		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+	}
+	ok := false
+	defer func() {
+		if !ok {
+			tmp.Close()
+			os.Remove(tmp.Name())
+		}
+	}()
+	if _, err := io.Copy(tmp, src); err != nil {
+		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+	}
+	if err := os.Rename(tmp.Name(), final); err != nil {
+		os.Remove(tmp.Name())
+		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+	}
+	ok = true
+	return nil
 }
 
 // RemoveFiles deletes the regular files directly in root/dir whose name

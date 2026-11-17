@@ -48,6 +48,7 @@ plain HTTP rather than SFTP.
 | `WORLDLINE_MORNING_FILE_AT`, `WORLDLINE_MORNING_FILE_WINDOW` | `08:00`, `2h` | The morning slot fires at that time plus a per-day jitter inside the window, deterministic for a given date |
 | `WORLDLINE_AFTERNOON_FILE_AT` | `15:30` | The afternoon slot, no jitter |
 | `WORLDLINE_SETTLEMENT_DELAY` | `24h` | A scheduled run settles the single day this long before now (T+1) |
+| `WORLDLINE_MAX_FILE_MB` | `512` | The largest file [`POST /sim/settlement-files/publish`](#post-simsettlement-filespublish) takes (`413` beyond). It is staged on disk (`TMPDIR`, `/tmp` in the image) and read row by row, never held whole, so this bounds disk, not memory. Keep it at least the lab API's `CONSOLE_UPLOAD_MAX_MB`, or a file the lab took is one Worldline refuses |
 | `BC_INTERNAL_URL` | empty (compose `http://banking-circle:8095`) | Banking Circle's bridge, for the lump sum. Empty: lump sums report `not configured` |
 | `BC_SAFEGUARDING_ACCOUNT_ID_EUR`, `BC_SAFEGUARDING_ACCOUNT_ID_GBP` | empty | The default environment's: a currency's lump sum is wired only when its account is set; no other currency is read. Every other environment's accounts are its own ([Environments](#environments)) |
 | `WORLDLINE_ENROLMENT_DELAY` | `30s` | How old an enrolment batch must be before it is answered, by file modification time on the wall clock |
@@ -544,6 +545,17 @@ no run is recorded. The lab API keeps what it answers as a file
   `SETTLEMENT_AMOUNT` in major units, `mids` every MID it settles
   (`ADDITIONAL_REF_2`). In `fixture` mode it is the slot's first fixture
   in that currency, under the fixture's own name.
+- With `Accept: text/csv` it answers `200` with the file itself instead,
+  `Content-Type: text/csv; charset=utf-8`, streamed as it is rendered, so
+  a file of millions of transactions is never held whole here or by the
+  caller; the lab API's cut asks for it this way. What the JSON answer
+  says beside `content` is in headers: `Lab-File-Name`,
+  `Lab-File-Currency`, `Lab-File-Total`, `Lab-File-Items`,
+  `Lab-File-MIDs` (how many: a header is no place for the list),
+  `Lab-File-Slot`, `Lab-File-From-Date` and `Lab-File-To-Date`, with
+  `Content-Disposition: attachment; filename=…`. A refusal is JSON either
+  way. A render that fails once the file has started is cut off, which
+  the caller reads as a broken body.
 - `404` `{"error": "nothing settles in EUR on 2026-09-24 in sbx: worldline
   holds no EUR transaction of that day there"}` when no transaction would
   be in the file. `400` for a missing or malformed `currency`, `date` or
@@ -568,14 +580,20 @@ is kept.
 - Query: `name`, required: the file's name, as the cycle names its own;
   no `/`, `\`, `..` or control character, at most 255 bytes. `wire`, `true` or `false` (default `false`). `env`, whose
   folder (the default's when none; `*` is `400`).
-- Body: the file, plain text, at most 64 MiB (`413` beyond).
-- The body is read with Worldline's own parser
-  (`worldline.ParseSettlementFile`): `400` with the parser's reason when
-  it is not a settlement file, such as `{"error": "worldline: not a
-  settlement file: it has no \"Settlement\" row"}` or an amount with
-  three decimals. Then it is written, plain as the cycle's files are,
-  into `download/` and `to_WLNORDIC/` of the environment's jail under the
-  name it is published under, replacing a file of that name.
+- Body: the file, plain text, at most `WORLDLINE_MAX_FILE_MB` (512 MiB;
+  `413` beyond, saying so).
+- The body is staged on disk as it arrives, then read row by row with
+  Worldline's own parser (`worldline.SummarizeSettlementFile`, which
+  refuses what `worldline.ParseSettlementFile` refuses without holding
+  the rows): `400` with the parser's reason when it is not a settlement
+  file, such as `{"error": "worldline: not a settlement file: it has no
+  \"Settlement\" row"}` or an amount with three decimals. Then it is
+  copied, plain as the cycle's files are, into `download/` and
+  `to_WLNORDIC/` of the environment's jail under the name it is published
+  under, replacing a file of that name. Each copy is written under a
+  hidden `.{name}.*.partial` name beside it and renamed into place when
+  whole, as the cycle's files are, so a platform polling mid-publish
+  sees the whole file or none of it.
 - With `wire=true`, the file's total (its `SETTLEMENT_AMOUNT`) is wired as
   the morning slot wires its lump sum: to the environment's safeguarding
   account over Banking Circle's bridge, referenced `WORLDLINE SETTLEMENT

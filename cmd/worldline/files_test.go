@@ -406,7 +406,7 @@ func TestAPublishAResetLandsInIsDropped(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := render(t, h, "", `{"currency":"EUR","date":"`+settleDay+`"}`)
-	parsed, err := worldline.ParseSettlementFile(strings.NewReader(f.Content))
+	sum, err := worldline.SummarizeSettlementFile(strings.NewReader(f.Content))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestAPublishAResetLandsInIsDropped(t *testing.T) {
 	// Started before the reset: nothing lands.
 	started := w.guard.start()
 	resetScope(t, w, simctl.ScopeFlow)
-	if _, err := w.publishFile(def, started, f.Name, []byte(f.Content), parsed, true); err != errReset {
+	if _, err := w.publishFile(def, started, f.Name, strings.NewReader(f.Content), sum, true); err != errReset {
 		t.Fatalf("publish after the reset: %v, want errReset", err)
 	}
 	if got := names(t, w.acq.root, wlsftp.DirDownload); len(got) != 0 || wires.Load() != 0 {

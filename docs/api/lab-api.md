@@ -645,8 +645,13 @@ MIDs the platform need not know.
 **Body** — `{"currency": "EUR", "date": "YYYY-MM-DD", "slot": "ER"}`;
 `date` and `slot` default as the cycle does (T+1, the morning).
 
+The file comes from Worldline as itself (`Accept: text/csv`) and goes to
+disk as it comes, so a cut of millions of transactions is never held in
+the lab API; the call may take up to 15 minutes.
+
 **Answers** — `201 {"file": {…}}`; Worldline's `404` when nothing settles,
-with its reason.
+with its reason; `502` when Worldline cannot be reached, answers anything
+but the file, or the file is cut short.
 
 **Reaches** — worldline `POST /sim/settlement-files/render`.
 
@@ -686,6 +691,11 @@ poll picks them up, or `POST /v1/platform/poll` asks it now.
 file per currency (a platform settles two currencies at once, never two
 files of one). `wire` (default `true`) wires each ER file's total to the
 environment's safeguarding account, as Worldline's morning does.
+
+Each file is streamed from disk to Worldline, never held in the lab API,
+and has up to 15 minutes. Worldline takes a file up to its own
+`WORLDLINE_MAX_FILE_MB` (512 by default, as `CONSOLE_UPLOAD_MAX_MB`); a
+larger one is that file's result `error`, `worldline: HTTP 413: …`.
 
 **Answers** — `200 {"env", "published": 2, "results": [{…Worldline's
 answer…, "file"}, …], "note"}`: each result is Worldline's answer (its

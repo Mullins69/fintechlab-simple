@@ -2,6 +2,7 @@ package worldline
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -354,5 +355,91 @@ func TestTheSummaryReadsWhatTheParserReadsWithoutHoldingTheRows(t *testing.T) {
 	}
 	if _, err := SummarizeSettlementFile(strings.NewReader("just,some,text\n")); err == nil {
 		t.Fatal("text that is no settlement file was summarised")
+	}
+}
+
+// The summary refuses what the parser refuses: publish checks a file with
+// the summary, and a file the parser would turn away must not be published.
+func TestTheSummaryRefusesWhatTheParserRefuses(t *testing.T) {
+	f := GenerateSettlementFile([]Transaction{
+		{ID: "a", MID: "M1", Currency: "EUR", AmountCents: 1000, Date: "2026-11-09"},
+	}, "EUR", "2026-11-09", "2026-11-09", BamboraOptions{})
+	var b bytes.Buffer
+	if err := f.WriteCSV(&b); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(b.String(), "\n"), "\n")
+	first := func(prefix string) int {
+		for i, l := range lines {
+			if strings.HasPrefix(l, prefix) {
+				return i
+			}
+		}
+		t.Fatalf("no line starts %s in\n%s", prefix, b.String())
+		return -1
+	}
+	with := func(edit func([]string) []string) string {
+		return strings.Join(edit(append([]string{}, lines...)), "\n") + "\n"
+	}
+	batch, txer := first(`"Batch"`), first(`"TXER"`)
+	cells := func(i int) []string { return strings.Split(lines[i], ",") }
+
+	for what, content := range map[string]string{
+		"a TXER row before any batch row": with(func(l []string) []string {
+			return append(l[:batch], append([]string{lines[txer]}, l[batch:]...)...)
+		}),
+		"a batch row with a third decimal": with(func(l []string) []string {
+			c := cells(batch)
+			c[4] = `"1.005"`
+			l[batch] = strings.Join(c, ",")
+			return l
+		}),
+		"a CB row that is no amount": with(func(l []string) []string {
+			return append(l, `"CB","x","x","x","x","x","not an amount","EUR","x","x"`)
+		}),
+		"no settlement row": "just,some,text\n",
+		"nothing":           "",
+	} {
+		_, perr := ParseSettlementFile(strings.NewReader(content))
+		_, serr := SummarizeSettlementFile(strings.NewReader(content))
+		if perr == nil {
+			t.Errorf("%s: the parser took it, so this case tests nothing", what)
+			continue
+		}
+		if serr == nil {
+			t.Errorf("%s: the parser refuses it (%v) and the summary took it", what, perr)
+		}
+	}
+}
+
+// CutCurrency writes, byte for byte, the file Cut holds, and says what
+// it settles as Cut does.
+func TestCutCurrencyWritesWhatCutHolds(t *testing.T) {
+	s := seededStore(t)
+	cfg := CycleConfig{Identifier: "Lab", SettlementAccount: "ACC"}
+	at := time.Date(2026, 9, 4, 9, 0, 0, 0, time.UTC)
+	files, err := Cut(s, cfg, SlotMorning, "2026-09-03", "2026-09-03", at)
+	if err != nil || len(files) != 2 {
+		t.Fatalf("Cut: %d files, %v", len(files), err)
+	}
+	for _, want := range files {
+		got, write, ok, err := CutCurrency(s, cfg, SlotMorning, strings.ToLower(want.Currency), "2026-09-03", "2026-09-03", at)
+		if err != nil || !ok {
+			t.Fatalf("CutCurrency %s: %v %v", want.Currency, ok, err)
+		}
+		var b bytes.Buffer
+		if err := write(&b); err != nil {
+			t.Fatal(err)
+		}
+		if b.String() != string(want.Bytes) {
+			t.Errorf("%s: CutCurrency wrote\n%s\nCut holds\n%s", want.Currency, b.String(), want.Bytes)
+		}
+		want.Bytes = nil
+		if fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("%s: CutCurrency says %+v, Cut %+v", want.Currency, got, want)
+		}
+	}
+	if _, _, ok, err := CutCurrency(s, cfg, SlotMorning, "USD", "2026-09-03", "2026-09-03", at); ok || err != nil {
+		t.Errorf("CutCurrency of nothing: %v %v, want not ok", ok, err)
 	}
 }

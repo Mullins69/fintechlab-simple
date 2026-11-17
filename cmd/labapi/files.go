@@ -226,23 +226,29 @@ func (a *app) cutSettlementFile(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 400, "currency is required")
 		return
 	}
-	var rendered struct {
-		Name    string `json:"name"`
-		Content string `json:"content"`
-	}
-	ctx, cancel := reqContext(r)
+	// The file comes back as itself, streamed, and goes to disk as it
+	// comes: a cut of millions of transactions is never held here.
+	req, _ := json.Marshal(b)
+	ctx, cancel := context.WithTimeout(r.Context(), fileCallTimeout)
 	defer cancel()
-	status, msg, err := a.controlJSON(ctx, http.MethodPost, "worldline", "/sim/settlement-files/render", b, &rendered)
-	switch {
-	case err != nil:
+	resp, err := a.controlStream(ctx, http.MethodPost, "worldline", "/sim/settlement-files/render",
+		"application/json", bytes.NewReader(req), int64(len(req)), "text/csv")
+	if err != nil {
 		httputilx.Error(w, 502, "worldline: "+err.Error())
 		return
-	case status != 200:
-		httputilx.Error(w, status, msg)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		httputilx.Error(w, resp.StatusCode, controlError(resp))
 		return
 	}
-	if !fileName.MatchString(rendered.Name) {
-		httputilx.Error(w, 502, "worldline named the file "+strconv.Quote(rendered.Name))
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "text/csv" {
+		httputilx.Error(w, 502, "worldline answered "+strconv.Quote(mt)+", not the file: is its image older than the lab API's?")
+		return
+	}
+	name := resp.Header.Get("Lab-File-Name")
+	if !fileName.MatchString(name) {
+		httputilx.Error(w, 502, "worldline named the file "+strconv.Quote(name))
 		return
 	}
 	dir := a.filesDir(r.Context(), sourceCut)
@@ -250,8 +256,26 @@ func (a *app) cutSettlementFile(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	path := filepath.Join(dir, rendered.Name)
-	if err := os.WriteFile(path, []byte(rendered.Content), 0o644); err != nil {
+	tmp, err := os.CreateTemp(dir, ".cut-*")
+	if err != nil {
+		httputilx.Error(w, 500, err.Error())
+		return
+	}
+	defer os.Remove(tmp.Name())
+	_, err = io.Copy(tmp, resp.Body)
+	if cerr := tmp.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		httputilx.Error(w, 502, "worldline: the file was cut short: "+err.Error())
+		return
+	}
+	path := filepath.Join(dir, name)
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		httputilx.Error(w, 500, err.Error())
+		return
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
@@ -386,28 +410,13 @@ func (a *app) publishSettlementFiles(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]any, 0, len(picks))
 	ok := 0
 	for _, p := range picks {
-		body, err := os.ReadFile(p.path)
+		res, err := a.publishOne(r.Context(), p.name, p.path, wire)
 		if err != nil {
 			results = append(results, map[string]any{"name": p.name, "error": err.Error()})
 			continue
 		}
-		q := url.Values{"name": {p.name}, "wire": {strconv.FormatBool(wire)}}
-		ctx, cancel := reqContext(r)
-		var out map[string]any
-		status, msg, err := a.controlRaw(ctx, "worldline", "/sim/settlement-files/publish?"+q.Encode(), body, &out)
-		cancel()
-		switch {
-		case err != nil:
-			results = append(results, map[string]any{"name": p.name, "error": "worldline: " + err.Error()})
-		case status >= 300:
-			results = append(results, map[string]any{"name": p.name, "error": fmt.Sprintf("worldline: HTTP %d: %s", status, msg)})
-		default:
-			ok++
-			// Worldline names the file it published (a Worldline-named file
-			// gets the moment's timestamp); file is the lab's copy.
-			out["file"] = p.name
-			results = append(results, out)
-		}
+		ok++
+		results = append(results, res)
 	}
 	status := 200
 	if ok == 0 {
@@ -417,6 +426,41 @@ func (a *app) publishSettlementFiles(w http.ResponseWriter, r *http.Request) {
 		"env": scopeOf(r.Context()), "published": ok, "results": results,
 		"note": fmt.Sprintf("%d of %d published in the environment's SFTP folder; the platform's next poll picks them up, or press Poll now", ok, len(picks)),
 	})
+}
+
+// publishOne has Worldline publish the file at path, streamed from disk:
+// a file of hundreds of megabytes is never held here, and its call has
+// fileCallTimeout, not a JSON call's seconds.
+func (a *app) publishOne(ctx context.Context, name, path string, wire bool) (map[string]any, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, fileCallTimeout)
+	defer cancel()
+	q := url.Values{"name": {name}, "wire": {strconv.FormatBool(wire)}}
+	resp, err := a.controlStream(ctx, http.MethodPost, "worldline", "/sim/settlement-files/publish?"+q.Encode(),
+		"text/csv", f, st.Size(), "")
+	if err != nil {
+		return nil, fmt.Errorf("worldline: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("worldline: HTTP %d: %s", resp.StatusCode, controlError(resp))
+	}
+	out := map[string]any{}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
+		return nil, fmt.Errorf("worldline: %w", err)
+	}
+	// Worldline names the file it published (a Worldline-named file gets
+	// the moment's timestamp); file is the lab's copy.
+	out["file"] = name
+	return out, nil
 }
 
 // pollClient is the one for a platform's poll, which downloads files
@@ -498,9 +542,34 @@ func (a *app) controlJSON(ctx context.Context, method, svc, path string, in, out
 	return a.controlCall(ctx, method, svc, path, "application/json", body, out)
 }
 
-// controlRaw POSTs raw bytes.
-func (a *app) controlRaw(ctx context.Context, svc, path string, body []byte, out any) (int, string, error) {
-	return a.controlCall(ctx, http.MethodPost, svc, path, "application/octet-stream", body, out)
+// fileCallTimeout bounds a call that carries a settlement file to or from
+// a control port: hundreds of megabytes, rendered or checked row by row on
+// the other side, take minutes, not a JSON call's seconds.
+const fileCallTimeout = 15 * time.Minute
+
+// controlStream makes one call to a lab service's control port in the
+// call's environment (ctx names it) with body streamed as it is read, size
+// bytes long, and returns the answer for the caller to read and close. It
+// is a.client without its whole-call timeout: ctx bounds the call instead,
+// so a file's call can take as long as it needs.
+func (a *app) controlStream(ctx context.Context, method, svc, path, ctype string, body io.Reader, size int64, accept string) (*http.Response, error) {
+	base := a.controlURL(svc)
+	if base == "" {
+		return nil, fmt.Errorf("%s has no control port", svc)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, base+path, body)
+	if err != nil {
+		return nil, err
+	}
+	req.ContentLength = size
+	if ctype != "" {
+		req.Header.Set("Content-Type", ctype)
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	client := &http.Client{Transport: a.client.Transport, CheckRedirect: a.client.CheckRedirect}
+	return client.Do(req)
 }
 
 func (a *app) controlCall(ctx context.Context, method, svc, path, ctype string, body []byte, out any) (int, string, error) {
@@ -520,20 +589,26 @@ func (a *app) controlCall(ctx context.Context, method, svc, path, ctype string, 
 		return 0, "", err
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if resp.StatusCode >= 300 {
-		var e struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(raw, &e) == nil && e.Error != "" {
-			return resp.StatusCode, e.Error, nil
-		}
-		return resp.StatusCode, strings.TrimSpace(string(raw)), nil
+		return resp.StatusCode, controlError(resp), nil
 	}
 	if out != nil {
-		if err := json.Unmarshal(raw, out); err != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
 			return resp.StatusCode, "", err
 		}
 	}
 	return resp.StatusCode, "", nil
+}
+
+// controlError is a control port's refusal: its {"error"} when it has one,
+// else its body, bounded.
+func controlError(resp *http.Response) string {
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	var e struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(raw, &e) == nil && e.Error != "" {
+		return e.Error
+	}
+	return strings.TrimSpace(string(raw))
 }

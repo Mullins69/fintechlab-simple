@@ -1,7 +1,9 @@
 package worldline
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -113,37 +115,80 @@ func Cut(store *Store, cfg CycleConfig, slot, fromDate, toDate string, at time.T
 	// the shape the real filename pattern implies (it carries no
 	// merchant). The platform splits it per MID on the way in.
 	var out []CutFile
+	txns := store.All()
 	for _, ccy := range store.CurrenciesInRange("", fromDate, toDate) {
-		f := GenerateSettlementFile(store.All(), ccy, fromDate, toDate, BamboraOptions{
-			ValueDate: toDate,
-			ToAccount: cfg.SettlementAccount,
-		})
-		if f.Meta.NumberOfItems == 0 {
+		f, write, ok := cutGenerated(txns, cfg, slot, ccy, fromDate, toDate, at)
+		if !ok {
 			continue
 		}
-		var buf strings.Builder
-		if err := f.WriteCSV(&buf); err != nil {
+		var buf bytes.Buffer
+		if err := write(&buf); err != nil {
 			return nil, fmt.Errorf("worldline: render %s settlement file: %w", ccy, err)
 		}
-		mids := make([]string, 0, len(f.Batches))
-		for _, b := range f.Batches {
-			if len(b.Transactions) > 0 {
-				mids = append(mids, b.Transactions[0].AdditionalRef2)
-			}
-		}
-		out = append(out, CutFile{
-			Filename:    BamboraFilename(cfg.Identifier, at, slot, ccy),
-			Slot:        slot,
-			MIDs:        mids,
-			Currency:    ccy,
-			AmountCents: f.Meta.SettlementAmount,
-			Items:       f.Meta.NumberOfItems,
-			FromDate:    fromDate,
-			ToDate:      toDate,
-			Bytes:       []byte(buf.String()),
-		})
+		f.Bytes = buf.Bytes()
+		out = append(out, f)
 	}
 	return out, nil
+}
+
+// CutCurrency is Cut for one currency, with the file's bytes left to be
+// written: what it settles, and write, which writes the file to w as Cut
+// would have rendered it, byte for byte. A file of millions of
+// transactions goes to w as it is rendered rather than being held whole
+// first. ok is false when nothing in ccy settles in [fromDate, toDate].
+//
+// From fixtures, the file is the first of the slot's that is a settlement
+// file in ccy, read to learn its currency, MIDs and total.
+func CutCurrency(store *Store, cfg CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (f CutFile, write func(w io.Writer) error, ok bool, err error) {
+	ccy = strings.ToUpper(ccy)
+	if cfg.Source != FileSourceFixture {
+		f, write, ok = cutGenerated(store.All(), cfg, slot, ccy, fromDate, toDate, at)
+		return f, write, ok, nil
+	}
+	files, err := cutFromFixtures(cfg, slot, fromDate, toDate, at)
+	if err != nil {
+		return CutFile{}, nil, false, err
+	}
+	for _, f := range files {
+		sum, err := SummarizeSettlementFile(bytes.NewReader(f.Bytes))
+		if err != nil || strings.ToUpper(sum.Meta.SettlementCurrency) != ccy {
+			continue
+		}
+		f.Currency, f.MIDs = ccy, sum.MIDs
+		f.AmountCents, f.Items = sum.Meta.SettlementAmount, sum.Meta.NumberOfItems
+		b := f.Bytes
+		f.Bytes = nil
+		return f, func(w io.Writer) error { _, err := w.Write(b); return err }, true, nil
+	}
+	return CutFile{}, nil, false, nil
+}
+
+// cutGenerated is the file of one currency the cycle generates from txns,
+// with write to render it; ok is false when it would have no items.
+func cutGenerated(txns []Transaction, cfg CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (CutFile, func(io.Writer) error, bool) {
+	f := GenerateSettlementFile(txns, ccy, fromDate, toDate, BamboraOptions{
+		ValueDate: toDate,
+		ToAccount: cfg.SettlementAccount,
+	})
+	if f.Meta.NumberOfItems == 0 {
+		return CutFile{}, nil, false
+	}
+	mids := make([]string, 0, len(f.Batches))
+	for _, b := range f.Batches {
+		if len(b.Transactions) > 0 {
+			mids = append(mids, b.Transactions[0].AdditionalRef2)
+		}
+	}
+	return CutFile{
+		Filename:    BamboraFilename(cfg.Identifier, at, slot, ccy),
+		Slot:        slot,
+		MIDs:        mids,
+		Currency:    ccy,
+		AmountCents: f.Meta.SettlementAmount,
+		Items:       f.Meta.NumberOfItems,
+		FromDate:    fromDate,
+		ToDate:      toDate,
+	}, f.WriteCSV, true
 }
 
 // cutFromFixtures serves the canned files in cfg.FixtureDir whose names

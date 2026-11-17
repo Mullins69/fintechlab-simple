@@ -17,12 +17,14 @@ package main
 // are (reset.go).
 
 import (
-	"bytes"
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -37,9 +39,24 @@ import (
 	"github.com/webduvet/fintechlab-simple/internal/worldline"
 )
 
-// maxSettlementFileBytes bounds a file handed to publish. A real day's
-// file is well under a megabyte; this is room, not a target.
-const maxSettlementFileBytes = 64 << 20
+// maxFileBytes bounds a file handed to publish: WORLDLINE_MAX_FILE_MB,
+// 512 by default, the same as the lab API takes an upload up to
+// (CONSOLE_UPLOAD_MAX_MB). A real day's file is well under a megabyte, but
+// testing a platform against a file of millions of transactions is one of
+// the things the lab is for, so the bound is room for that, not a target.
+// A file is streamed to disk and read row by row, never held whole, so the
+// bound is on disk, not memory.
+func maxFileBytes() int64 {
+	mb, err := strconv.ParseInt(os.Getenv("WORLDLINE_MAX_FILE_MB"), 10, 64)
+	if err != nil || mb <= 0 {
+		mb = 512
+	}
+	return mb << 20
+}
+
+// csvContentType is how render answers a caller that asks for the file
+// itself (Accept: text/csv) rather than JSON.
+const csvContentType = "text/csv; charset=utf-8"
 
 // maxPublishName is the 255 bytes a filename may have.
 const maxPublishName = 255
@@ -120,7 +137,7 @@ func (s *sim) renderSettlementFile(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started := e.guard.start()
-	f, found, err := e.acq.cutOne(cfg, slot, ccy, fromDate, toDate, at)
+	f, write, found, err := worldline.CutCurrency(e.acq.store, cfg, slot, ccy, fromDate, toDate, at)
 	if err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
@@ -136,34 +153,62 @@ func (s *sim) renderSettlementFile(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 404, nothingSettles(e.env, cfg, slot, ccy, fromDate, toDate))
 		return
 	}
+	if wantsCSV(r) {
+		writeRendered(w, f, write)
+		return
+	}
+	var content strings.Builder
+	if err := write(&content); err != nil {
+		httputilx.Error(w, 500, err.Error())
+		return
+	}
 	httputilx.WriteJSON(w, 200, renderedFile{
-		Name: f.Filename, Content: string(f.Bytes), Currency: f.Currency, MIDs: f.MIDs,
+		Name: f.Filename, Content: content.String(), Currency: f.Currency, MIDs: f.MIDs,
 		Total: formatMinor(f.AmountCents), Items: f.Items, Slot: f.Slot, FromDate: f.FromDate, ToDate: f.ToDate,
 	})
 }
 
-// cutOne is the file of ccy the cycle under cfg would cut at `at`, by the
-// cycle's own Cut: nothing is written. A fixture's figures are read from
-// its bytes, which the cut leaves to the reader.
-func (s *settlementApp) cutOne(cfg worldline.CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (worldline.CutFile, bool, error) {
-	files, err := worldline.Cut(s.store, cfg, slot, fromDate, toDate, at)
-	if err != nil {
-		return worldline.CutFile{}, false, err
-	}
-	for _, f := range files {
-		if f.Currency == "" {
-			p, err := worldline.ParseSettlementFile(bytes.NewReader(f.Bytes))
-			if err != nil {
-				continue
+// wantsCSV is whether render's caller asked for the file itself.
+func wantsCSV(r *http.Request) bool {
+	for _, v := range r.Header.Values("Accept") {
+		for _, part := range strings.Split(v, ",") {
+			mt, _, _ := strings.Cut(strings.TrimSpace(part), ";")
+			if strings.EqualFold(strings.TrimSpace(mt), "text/csv") {
+				return true
 			}
-			f.Currency, f.MIDs = strings.ToUpper(p.Meta.SettlementCurrency), p.MIDs()
-			f.AmountCents, f.Items = p.Meta.SettlementAmount, p.Meta.NumberOfItems
-		}
-		if f.Currency == ccy {
-			return f, true, nil
 		}
 	}
-	return worldline.CutFile{}, false, nil
+	return false
+}
+
+// writeRendered answers the file itself, streamed as it is rendered, with
+// what it settles in headers: a file of millions of transactions is never
+// held whole, here or by the caller. The MIDs are counted, not listed: a
+// header is no place for a list of thousands.
+func writeRendered(w http.ResponseWriter, f worldline.CutFile, write func(io.Writer) error) {
+	h := w.Header()
+	h.Set("Content-Type", csvContentType)
+	h.Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": f.Filename}))
+	h.Set("Lab-File-Name", f.Filename)
+	h.Set("Lab-File-Currency", f.Currency)
+	h.Set("Lab-File-Total", formatMinor(f.AmountCents))
+	h.Set("Lab-File-Items", strconv.Itoa(f.Items))
+	h.Set("Lab-File-MIDs", strconv.Itoa(len(f.MIDs)))
+	h.Set("Lab-File-Slot", f.Slot)
+	h.Set("Lab-File-From-Date", f.FromDate)
+	h.Set("Lab-File-To-Date", f.ToDate)
+	w.WriteHeader(200)
+	bw := bufio.NewWriterSize(w, 1<<16)
+	err := write(bw)
+	if err == nil {
+		err = bw.Flush()
+	}
+	if err != nil {
+		// The status is sent: all that is left to say a file was cut
+		// short is to not end it, which the caller reads as a broken body.
+		log.Printf("worldline: render %s: %v", f.Filename, err)
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // nothingSettles is render's 404: why there is no file.
@@ -219,22 +264,36 @@ func (s *sim) publishSettlementFile(w http.ResponseWriter, r *http.Request) {
 		}
 		wire = b
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxSettlementFileBytes+1))
+	// The file is staged on disk and read from there, twice: once row by
+	// row to check it, and once into each folder. It is never held whole.
+	staged, err := os.CreateTemp("", "worldline-publish-*.csv")
 	if err != nil {
+		httputilx.Error(w, 500, "stage the file: "+err.Error())
+		return
+	}
+	defer os.Remove(staged.Name())
+	defer staged.Close()
+	limit := maxFileBytes()
+	if _, err := io.Copy(staged, http.MaxBytesReader(w, r.Body, limit)); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			httputilx.Error(w, 413, fmt.Sprintf("a settlement file here is at most %d MiB (WORLDLINE_MAX_FILE_MB)", limit>>20))
+			return
+		}
 		httputilx.Error(w, 400, "read body: "+err.Error())
 		return
 	}
-	if len(body) > maxSettlementFileBytes {
-		httputilx.Error(w, 413, fmt.Sprintf("a settlement file here is at most %d MiB", maxSettlementFileBytes>>20))
+	if _, err := staged.Seek(0, io.SeekStart); err != nil {
+		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	parsed, err := worldline.ParseSettlementFile(bytes.NewReader(body))
+	sum, err := worldline.SummarizeSettlementFile(staged)
 	if err != nil {
 		httputilx.Error(w, 400, err.Error())
 		return
 	}
 	name = delivered(name, e.acq.config().Identifier, labclock.Now())
-	out, err := s.publishFile(e, started, name, body, parsed, wire)
+	out, err := s.publishFile(e, started, name, staged, sum, wire)
 	switch {
 	case errors.Is(err, errReset):
 		httputilx.Error(w, 409, "worldline was reset while this file was being published: nothing of it is left, publish it again")
@@ -262,22 +321,22 @@ func checkPublishName(name string) error {
 	return nil
 }
 
-// publishFile puts f, whose bytes are body, in e's download/ and
-// to_WLNORDIC/ under name, plain, as the cycle publishes a file it cut,
-// and with wire wires its total to e's safeguarding account
+// publishFile puts the file src holds, which sum describes, in e's
+// download/ and to_WLNORDIC/ under name, plain, as the cycle publishes a
+// file it cut, and with wire wires its total to e's safeguarding account
 // as the morning cycle does: only a file that is not an afternoon (AR)
 // confirmation, and only a positive total. Each effect lands only if no
 // reset came since started; the first that would land after one ends it
 // with errReset, and what landed before is the reset's to take back.
-func (s *sim) publishFile(e *envSim, started uint64, name string, body []byte, f *worldline.ParsedFile, wire bool) (publishedFile, error) {
-	ccy := strings.ToUpper(f.Meta.SettlementCurrency)
-	amount := f.Meta.SettlementAmount
-	out := publishedFile{Name: name, Currency: ccy, Total: formatMinor(amount), MIDs: f.MIDs()}
+func (s *sim) publishFile(e *envSim, started uint64, name string, src io.ReadSeeker, sum worldline.SettlementSummary, wire bool) (publishedFile, error) {
+	ccy := strings.ToUpper(sum.Meta.SettlementCurrency)
+	amount := sum.Meta.SettlementAmount
+	out := publishedFile{Name: name, Currency: ccy, Total: formatMinor(amount), MIDs: append([]string{}, sum.MIDs...)}
 	wire = wire && worldline.FilenameSlot(name) != worldline.SlotAfternoon && amount > 0
 
 	var err error
 	if !e.guard.apply(started, func() {
-		out.Published, err = wlsftp.Publish(e.acq.root, name, body)
+		out.Published, err = wlsftp.PublishFrom(e.acq.root, name, src)
 		if err != nil {
 			return
 		}
@@ -294,7 +353,7 @@ func (s *sim) publishFile(e *envSim, started uint64, name string, body []byte, f
 	if wire {
 		// The cycle's reference names the day settled, its toDate, which
 		// is the file's value date.
-		valueDate := f.Meta.ValueDate
+		valueDate := sum.Meta.ValueDate
 		if valueDate == "" {
 			valueDate = labclock.Now().UTC().Format("2006-01-02")
 		}

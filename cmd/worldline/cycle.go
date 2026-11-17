@@ -128,6 +128,13 @@ func (s *settlementApp) run(slot string, at time.Time, fromDate, toDate string) 
 		run.Published = append(run.Published, name)
 		totals[f.Currency] += f.AmountCents
 	}
+	// The files are published: the run keeps what they settled, not their
+	// bytes. The history holds 100 runs, and 100 runs of a file of millions
+	// of transactions is gigabytes held for a JSON answer that never shows
+	// a byte of them (CutFile.Bytes is not serialised).
+	for i := range run.Files {
+		run.Files[i].Bytes = nil
+	}
 
 	if slot == worldline.SlotMorning {
 		for ccy, amount := range totals {

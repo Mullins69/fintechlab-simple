@@ -408,6 +408,15 @@ Routes: `GET /v1/platform`, `POST /v1/platform/check`, `POST /v1/platform/seed`,
 `POST /v1/settlement-files/generate` (the seeder's file),
 `POST /v1/settlement-files/cut` (Worldline's, from the lab's trading).
 
-**Still open (6.2): files of millions of transactions end to end.** They
-are made and listed without being held in memory, but Worldline's publish
-still reads a file whole (64 MiB); it should stream from the lab's volume.
+**Done (6.2): files of millions of transactions end to end.** They are
+made, listed, cut and published without being held in memory. The lab API
+streams a file to Worldline's publish from its volume, and Worldline's
+render to its volume (`Accept: text/csv`), each call with up to 15
+minutes. Worldline stages a published file on disk, checks it row by
+row, and renames each copy into its folder whole. It takes a file up to
+`WORLDLINE_MAX_FILE_MB` (512 by default, as `CONSOLE_UPLOAD_MAX_MB`). Its
+run history keeps what a file settled, not its bytes. What is still held
+whole is Worldline's own trading: the cut and the scheduled cycle render
+from the transactions it keeps in memory, so a cut of millions of
+transactions needs Worldline to hold those millions. A file from the
+seeder or an upload does not.
