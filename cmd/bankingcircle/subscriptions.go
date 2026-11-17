@@ -244,30 +244,17 @@ func answerDeactivated(w http.ResponseWriter, sub *bankingcircle.Subscription, e
 
 func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	match := ifMatch(r)
-	sub, dropped, err := a.bank.RemoveSubscription(scopeOf(r), r.PathValue("id"), &match)
-	if err != nil {
-		writeSubscriptionError(w, err)
-		return
+	if _, _, ok := a.removeSubscription(w, r, r.PathValue("id"), &match, "deleted by its subscriber"); ok {
+		w.WriteHeader(200)
 	}
-	a.recordRemoved(sub, dropped, "deleted by its subscriber")
-	w.WriteHeader(200)
 }
 
 // simDeleteSubscription is DELETE /sim/subscription/{subscriptionId}: the
 // vendor's DELETE without If-Match, the lab overriding the concurrency
-// check as it does for activate and deactivate. What the dispatcher held
-// for it goes with it, and the state file is written before it answers, so
-// a restart cannot bring the subscription back.
+// check as it does for activate and deactivate.
 func (a *app) simDeleteSubscription(w http.ResponseWriter, r *http.Request) {
-	sub, dropped, err := a.bank.RemoveSubscription(scopeOf(r), r.PathValue("subscriptionId"), nil)
-	if err != nil {
-		writeSubscriptionError(w, err)
-		return
-	}
-	a.recordRemoved(sub, dropped, "deleted by the lab")
-	log.Printf("banking-circle: subscription %s (%s) deleted by the lab; %d notification(s) dropped", sub.ID, sub.Endpoint, dropped)
-	if err := a.persistNow(); err != nil {
-		httputilx.Error(w, 500, "deleted in memory, but "+err.Error())
+	sub, dropped, ok := a.removeSubscription(w, r, r.PathValue("subscriptionId"), nil, "deleted by the lab")
+	if !ok {
 		return
 	}
 	httputilx.WriteJSON(w, 200, map[string]any{
@@ -276,6 +263,28 @@ func (a *app) simDeleteSubscription(w http.ResponseWriter, r *http.Request) {
 		"deleted":        true,
 		"dropped":        dropped,
 	})
+}
+
+// removeSubscription is both DELETEs, the vendor's (ifMatch, its
+// rowVersion) and the lab's (nil): subscription id, r's environment's, goes
+// with what the dispatcher held for it, the deletion is logged, and the
+// state file is written before the caller answers -- a deletion the bank
+// has answered must not come back with a restart. ok is false when it has
+// answered already: the subscription's error, or a 500 when the state file
+// was not written.
+func (a *app) removeSubscription(w http.ResponseWriter, r *http.Request, id string, ifMatch *string, by string) (sub *bankingcircle.Subscription, dropped int, ok bool) {
+	sub, dropped, err := a.bank.RemoveSubscription(scopeOf(r), id, ifMatch)
+	if err != nil {
+		writeSubscriptionError(w, err)
+		return nil, 0, false
+	}
+	a.recordRemoved(sub, dropped, by)
+	log.Printf("banking-circle: subscription %s (%s) %s; %d notification(s) dropped", sub.ID, sub.Endpoint, by, dropped)
+	if err := a.persistNow(); err != nil {
+		httputilx.Error(w, 500, "deleted in memory, but "+err.Error())
+		return nil, 0, false
+	}
+	return sub, dropped, true
 }
 
 // simResetSubscriptions is POST /sim/subscriptions/reset: the environment's

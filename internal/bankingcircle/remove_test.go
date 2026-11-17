@@ -104,8 +104,8 @@ func TestDeletingASubscriptionEndsItsRelease(t *testing.T) {
 	if sent != 1 {
 		t.Errorf("%d batches reached the deleted subscription's endpoint, want only the one already on the wire", sent)
 	}
-	if dropped != 20 {
-		t.Errorf("dropped %d, want 20: the batch on the wire and the three behind it", dropped)
+	if dropped != 15 {
+		t.Errorf("dropped %d, want 15: the three batches behind the one on the wire, which was delivered", dropped)
 	}
 	b.disp.mu.Lock()
 	inflight := len(b.disp.inflight)
@@ -215,5 +215,103 @@ func TestResettingSubscriptionsPutsTheSeedBackWithNothingHeld(t *testing.T) {
 	b.disp.mu.Unlock()
 	if batching != 1 {
 		t.Errorf("%d notification(s) batching for the seed, want its 1 still on its way", batching)
+	}
+}
+
+// A batch waiting out its retry schedule when its subscription is reset
+// away stops there, even when a new subscription has since been given the
+// same id: it neither reaches the old endpoint again nor touches the new
+// subscription.
+func TestADeletedSubscriptionsRetryLeavesTheNextOneUnderItsIdAlone(t *testing.T) {
+	cfg := fastConfig(1)
+	cfg.Schedule[0].After = Duration(300 * time.Millisecond)
+	b := newTestBank(t, time.Hour, cfg)
+	old := subscribeEverything(t, b.subs, "https://example.test/run-1", 5)
+
+	var mu sync.Mutex
+	sends := map[string]int{}
+	failed := make(chan struct{}, 1)
+	b.disp.Send = func(_ context.Context, sub *Subscription, _ Envelope) error {
+		mu.Lock()
+		sends[sub.Endpoint]++
+		mu.Unlock()
+		select {
+		case failed <- struct{}{}:
+		default:
+		}
+		return errors.New("destination returned 500")
+	}
+	b.disp.Enqueue(old, Notification{EventID: "run-1"})
+	b.disp.Flush(old.ID)
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the first attempt never went out")
+	}
+
+	// The reset hands the seed's ids out again: nothing but the seed is left.
+	b.bank.ResetSubscriptions(tenant.Default)
+	next := subscribeEverything(t, b.subs, "https://example.test/run-2", 5)
+	if next.ID != old.ID {
+		t.Fatalf("the next subscription is %s, want %s again: the test needs the id reused", next.ID, old.ID)
+	}
+
+	within(t, 2*time.Second, "the abandoned retry", b.disp.Wait)
+	mu.Lock()
+	defer mu.Unlock()
+	if sends["https://example.test/run-1"] != 1 || sends["https://example.test/run-2"] != 0 {
+		t.Errorf("sent %v, want the first attempt alone: the retry belonged to a deleted subscription", sends)
+	}
+	if got, _ := b.subs.Get(next.ID); !got.IsActive {
+		t.Errorf("the new subscription was deactivated by the old one's schedule: %s", got.StatusMessage)
+	}
+	if n := b.disp.Pending(next.ID); n != 0 {
+		t.Errorf("%d of the old subscription's notification(s) retained for the new one", n)
+	}
+}
+
+// A delete that lands while the last attempt is on the wire is not undone
+// when that attempt fails: nothing is retained for the deleted id, nothing
+// is deactivated, and the state file holds nothing for it.
+func TestADeleteDuringTheLastAttemptHoldsNothingForTheDeletedId(t *testing.T) {
+	b := newTestBank(t, time.Hour, fastConfig(0)) // the first attempt is the last
+	platform := subscribeEverything(t, b.subs, "https://example.test/platform", 5)
+
+	onTheWire, letGo := make(chan struct{}), make(chan struct{})
+	b.disp.Send = func(context.Context, *Subscription, Envelope) error {
+		close(onTheWire)
+		<-letGo
+		return errors.New("destination returned 500")
+	}
+	b.disp.Enqueue(platform, Notification{EventID: "on-the-wire"})
+	b.disp.Flush(platform.ID)
+	select {
+	case <-onTheWire:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the batch never went out")
+	}
+
+	_, dropped, err := b.bank.RemoveSubscription(tenant.Default, platform.ID, nil)
+	close(letGo)
+	if err != nil {
+		t.Fatalf("the lab's delete: %v", err)
+	}
+	within(t, 2*time.Second, "the last attempt", b.disp.Wait)
+	if dropped != 0 {
+		t.Errorf("dropped %d, want 0: the one batch was on the wire, and may have arrived", dropped)
+	}
+	b.disp.mu.Lock()
+	_, owned := b.disp.owners[platform.ID]
+	inflight := len(b.disp.inflight)
+	b.disp.mu.Unlock()
+	if n := b.disp.Pending(platform.ID); n != 0 || owned || inflight != 0 {
+		t.Errorf("the dispatcher holds %d retained, owner=%v, %d in flight for the deleted subscription, want nothing", n, owned, inflight)
+	}
+	var st State
+	b.disp.Snapshot(&st)
+	for _, held := range st.Notifications {
+		if held.SubscriptionID == platform.ID {
+			t.Errorf("the state file holds %d %s notification(s) for the deleted subscription", len(held.Notifications), held.Held)
+		}
 	}
 }

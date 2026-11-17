@@ -934,21 +934,32 @@ func (a *app) bcSubscriptionPause(w http.ResponseWriter, r *http.Request) {
 // bcSubscriptionDelete removes one of Banking Circle's subscriptions, as
 // its subscriber's DELETE would but without the rowVersion: the lab's
 // override, the way activate and deactivate are. Banking Circle stops
-// calling the endpoint, and what was waiting for it is dropped. A
-// subscription this environment does not have is a 404, Banking Circle's.
+// calling the endpoint, and what was waiting for it is dropped. A refusal
+// is Banking Circle's own, status and words (bcRefusal): a subscription
+// this environment does not have is its 404, a deletion it made but could
+// not write to its state file its 500.
 func (a *app) bcSubscriptionDelete(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqContext(r)
 	defer cancel()
 	var out map[string]any
 	if err := a.bc.Delete(ctx, "/sim/subscription/"+url.PathEscape(r.PathValue("id")), &out); err != nil {
-		status := 502
-		if console.RefusedWith(err) == http.StatusNotFound {
-			status = 404
-		}
-		httputilx.Error(w, status, err.Error())
+		httputilx.Error(w, bcRefusal(err), err.Error())
 		return
 	}
 	httputilx.WriteJSON(w, 200, out)
+}
+
+// bcRefusal is the status to answer a failed call to Banking Circle with:
+// the bank's own when it answered, as the passthrough would pass it on, and
+// 502 only when it never did. A 500 that says the bank did the work but
+// could not write it down is not a gateway failure, and must not read as
+// one: a caller that retries a 502 meets a 404 and never learns that a
+// restart would undo what it asked for.
+func bcRefusal(err error) int {
+	if code := console.RefusedWith(err); code != 0 {
+		return code
+	}
+	return 502
 }
 
 // bcSubscriptionsReset puts the environment's subscriptions back as
@@ -962,7 +973,7 @@ func (a *app) bcSubscriptionsReset(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	var out map[string]any
 	if err := a.bc.Post(ctx, "/sim/subscriptions/reset", &out); err != nil {
-		httputilx.Error(w, 502, err.Error())
+		httputilx.Error(w, bcRefusal(err), err.Error())
 		return
 	}
 	httputilx.WriteJSON(w, 200, out)

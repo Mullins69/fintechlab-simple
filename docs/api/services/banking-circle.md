@@ -344,12 +344,15 @@ Switches a subscription off.
 Removes a subscription and its events. Irreversible.
 
 - Headers: `If-Match: <rowVersion>`.
-- Answers `200` with an empty body. `404`; `412`.
+- Answers `200` with an empty body. `404`; `412`; `500` when the
+  subscription is deleted but the state file could not be written.
 - Side effects: a batch on its way out stops at its next attempt, in its
   retry schedule or waiting its turn in a release; only a send already on
-  the wire finishes. What the bank held for the subscription is dropped
-  with it: the batch filling up, what a pause parked and the pause, and
-  what it retained. `subscription.delete` in the `notifications` log.
+  the wire finishes, and it is not retried. What the bank held for the
+  subscription is dropped with it: the batch filling up, what a pause
+  parked and the pause, and what it retained. `subscription.delete` in the
+  `notifications` log. The state file is written before it answers, so a
+  restart does not bring the subscription back.
 
 ### `POST /api/v1/notificationselfservice/subscriptionEvent`
 
@@ -1169,16 +1172,18 @@ with the subscription, as the vendor's does; `404`; never `412`.
 
 `DELETE …/subscription/{id}` without `If-Match`. Answers `200`
 `{"subscriptionId": "sub_8f3e1a0c2b6d", "endpoint": "https://…", "deleted": true, "dropped": 3}`;
-`404` for an id the environment does not have; never `412`.
+`404` for an id the environment does not have; never `412`; `500` when
+the subscription is deleted but the state file could not be written.
 
 - Side effects: the vendor's, and what the bank held for the subscription
   goes with it: the batch filling up, what a pause parked and the pause,
   what it retained after the retry schedule gave up, and the batches on
   their way out, which stop at their next attempt. `dropped` counts those
-  notifications, a batch on the wire at that moment included (it may still
-  arrive). `subscription.delete` in the `notifications` log.
+  notifications: every one that will now never be sent. A send on the wire
+  at that moment is not counted (the endpoint may still acknowledge it)
+  and is not retried. `subscription.delete` in the `notifications` log.
   The state file is written before it answers. The vendor's own `DELETE`
-  drops the same and logs it too.
+  does all the same.
 
 ### `POST /sim/subscriptions/reset`
 

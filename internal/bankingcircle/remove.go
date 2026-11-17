@@ -14,16 +14,24 @@ import (
 // the batches on their way out. Left behind, they would sit in the state
 // file for good -- nothing can release a pause on a subscription nobody can
 // name -- and a subscription put back later under the same id would inherit
-// them. A batch on its way out stops at its next attempt, which finds the
-// subscription gone (Dispatcher.deliverSync): mid-schedule, or still
-// waiting its turn in a release. Only a send already on the wire finishes.
+// them. A batch on its way out stops at its next step, which finds its
+// flight dropped (Dispatcher.deliverSync): mid-schedule, or still waiting
+// its turn in a release. Only a send already on the wire finishes, and it
+// is not retried.
+//
+// Neither moves the run, as a reset does: the subscription's work stops
+// through its own flights, and the environment's payments carry on. A
+// subscription made later under a deleted one's id -- a reset of the
+// subscriptions hands out the seed's ids again once nothing else is left --
+// inherits nothing: no flight of the old one's is left to find.
 
 // RemoveSubscription deletes subscription id, scope's, and what the
 // dispatcher held for it. ifMatch is the vendor's concurrency check: nil
 // is the lab's override, which takes any rowVersion. It answers the
-// subscription as it was and how many notifications went with it, a batch
-// on the wire at that moment included; ErrSubscriptionNotFound for another
-// environment's, as for an unknown one.
+// subscription as it was and how many notifications went with it: every
+// one it held that will now never be sent. A send on the wire at that
+// moment is not among them; it may still be acknowledged.
+// ErrSubscriptionNotFound for another environment's, as for an unknown one.
 //
 // It takes the dispatcher's and the store's locks, not the bank's: it is
 // the vendor's DELETE, and must not wait behind a reset. A reset takes the
@@ -133,9 +141,10 @@ func (d *Dispatcher) clearHeldLocked(id string) (notifications int, paused bool)
 
 // forgetLocked drops everything the dispatcher holds for subscription id:
 // what clearHeldLocked drops, its batch filling up (and the flush timer),
-// and its batches on their way out, which stop at their next attempt. It
-// counts the notifications dropped and reports whether it was paused.
-// Caller holds d.mu.
+// and its batches on their way out, which stop at their next step. It
+// counts the notifications it dropped -- not a batch on the wire, which
+// may yet be delivered -- and reports whether it was paused. Caller holds
+// d.mu.
 func (d *Dispatcher) forgetLocked(id string) (notifications int, paused bool) {
 	notifications, paused = d.clearHeldLocked(id)
 	if q, ok := d.queues[id]; ok {
@@ -147,7 +156,9 @@ func (d *Dispatcher) forgetLocked(id string) (notifications int, paused bool) {
 	}
 	for f := range d.inflight {
 		if f.sub == id {
-			notifications += f.n
+			if !f.sending {
+				notifications += f.n
+			}
 			delete(d.inflight, f)
 		}
 	}

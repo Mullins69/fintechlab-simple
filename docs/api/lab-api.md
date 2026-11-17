@@ -1560,14 +1560,17 @@ the lab can remove a subscription whatever its `rowVersion`.
 
 **Answers** — `200`, Banking Circle's body:
 `{"subscriptionId": "sub_…", "endpoint": "…", "deleted": true, "dropped": 3}`.
-`dropped` counts the notifications Banking Circle had not delivered to
-it: in a batch filling up, parked behind a pause, retained after the bank
-gave up on the endpoint, or on their way out. They go with it, and so does
-a pause. A batch on its way out stops at its next attempt, in its retry
-schedule or waiting its turn in a release; only a send already on the wire
-finishes, and it is counted in `dropped` though it may still arrive. `404` for an id the environment
-does not have, another environment's included; `502` when Banking Circle
-refuses otherwise or is unreachable.
+`dropped` counts the notifications that will now never be sent: in a batch
+filling up, parked behind a pause, retained after the bank gave up on the
+endpoint, or on their way out. They go with it, and so does a pause. A
+batch on its way out stops at its next attempt, in its retry schedule or
+waiting its turn in a release. Only a send already on the wire finishes:
+it is not in `dropped`, because the endpoint may still acknowledge it, and
+it is not retried if it fails. A refusal is Banking Circle's own, status
+and words: `404` for an id the environment does not have, another
+environment's included; `500` when the subscription is deleted but Banking
+Circle could not write its state file, so a restart would bring it back.
+`502` only when Banking Circle is unreachable.
 
 - A platform that subscribes on boot subscribes again when it next
   starts. The deletion is in the subscription's *Notifications sent* log
@@ -1599,8 +1602,10 @@ one, or every one with `*`.
 
 `subscriptions` counts each one deleted and each seeded one put back
 because it had been deleted or changed since. `notifications` and `pauses`
-are what went with the deleted ones and what the seeded one held. `502` when Banking Circle refuses or
-is unreachable.
+are what went with the deleted ones and what the seeded one held. A
+refusal is Banking Circle's own, status and words: `500` when it reset the
+subscriptions but could not write its state file. `502` only when Banking
+Circle is unreachable.
 
 **Reaches** — `banking-circle POST /sim/subscriptions/reset`.
 

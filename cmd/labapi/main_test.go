@@ -683,6 +683,11 @@ func (f *bcFake) server(t *testing.T) *httptest.Server {
 		switch {
 		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/sim/subscription/"):
 			f.calls = append(f.calls, r.Method+" "+r.URL.RequestURI())
+			if r.URL.Path == "/sim/subscription/sub_unwritten" {
+				w.WriteHeader(500)
+				_, _ = w.Write([]byte(`{"error":"deleted in memory, but the state file was not written","status":500}`))
+				return
+			}
 			if r.URL.Path != "/sim/subscription/sub_1" {
 				w.WriteHeader(404)
 				_, _ = w.Write([]byte(`{"error":"subscription not found","status":404}`))
@@ -1265,7 +1270,8 @@ func TestALabWithNoClockIsOnTheRealTime(t *testing.T) {
 // TestDeleteAndResetAreBankingCirclesOwn. Like the pause, nothing is kept
 // here: one call to the vendor's control port, its answer passed on. An id
 // the bank does not have is its 404, not a gateway failure, so a card that
-// lost a race with another delete says what happened.
+// lost a race with another delete says what happened; and a delete it made
+// but could not write down is its 500, not a gateway failure.
 func TestDeleteAndResetAreBankingCirclesOwn(t *testing.T) {
 	fake := &bcFake{}
 	srv := fake.server(t)
@@ -1280,6 +1286,10 @@ func TestDeleteAndResetAreBankingCirclesOwn(t *testing.T) {
 	w = call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_gone", "")
 	if w.Code != 404 || !strings.Contains(w.Body.String(), "subscription not found") {
 		t.Errorf("deleting an id the bank does not have = %d %s, want its 404 in its words", w.Code, w.Body.String())
+	}
+	w = call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_unwritten", "")
+	if w.Code != 500 || !strings.Contains(w.Body.String(), "state file was not written") {
+		t.Errorf("a delete the bank made but could not write down = %d %s, want its 500 in its words, not a 502", w.Code, w.Body.String())
 	}
 	if w := call(t, a, http.MethodDelete, "/v1/banking-circle/subscriptions/sub_1?env=*", ""); w.Code != 400 {
 		t.Errorf("a delete in every environment at once = %d, want 400: an id is one environment's", w.Code)
@@ -1299,6 +1309,7 @@ func TestDeleteAndResetAreBankingCirclesOwn(t *testing.T) {
 	want := []string{
 		"DELETE /sim/subscription/sub_1",
 		"DELETE /sim/subscription/sub_gone",
+		"DELETE /sim/subscription/sub_unwritten",
 		"POST /sim/subscriptions/reset",
 		"POST /sim/subscriptions/reset",
 	}

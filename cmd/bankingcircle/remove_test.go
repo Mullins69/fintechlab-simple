@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -61,5 +62,41 @@ func TestTheLabDeletesASubscriptionAndItStaysGoneAfterARestart(t *testing.T) {
 	subs, _ := b.subs.ListIn(tenant.All, 1, 100)
 	if len(subs) != 1 || subs[0].ID != seeded.ID {
 		t.Fatalf("after the restart the bank holds %v, want the seeded subscription alone", subs)
+	}
+}
+
+// The vendor's own DELETE is on disk before it answers, as the lab's is: a
+// platform told 200 must not see its subscription back after a restart that
+// came before the state file's next coalesced write.
+func TestTheSubscribersDeleteIsWrittenBeforeItAnswers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	a := openTestApp(t, path, time.Hour, time.Hour, nil)
+	r := rigFor(t, a)
+	sub := subscribeAll(t, a, "https://example.test/platform")
+	if err := a.persistNow(); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest("DELETE", r.vendor+"/api/v1/notificationselfservice/subscription/"+sub.ID, nil)
+	req.Header.Set("Authorization", "Bearer "+a.tokens.issue(time.Hour))
+	req.Header.Set("If-Match", sub.RowVersion)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("the vendor's delete = %d, want 200", resp.StatusCode)
+	}
+
+	// Read at once: the coalesced writer waits stateWriteDelay first.
+	st, err := bankingcircle.LoadState(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range st.Subscriptions.Subscriptions {
+		if rec.ID == sub.ID {
+			t.Fatal("the state file still holds the subscription its subscriber deleted")
+		}
 	}
 }
