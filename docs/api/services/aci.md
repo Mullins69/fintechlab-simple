@@ -32,7 +32,7 @@ surfaces, out of scope).
 | `WEBHOOK_ALLOWLIST` | `localhost,127.0.0.1` (compose adds `receiver`, `receiver:8443`) | Hosts the target may name. A target outside it, and outside its environment's `webhook_hosts`, fails every attempt |
 | `RETRY_BACKOFF`, `MAX_ATTEMPTS` | `1s,2s,4s`, `4` | Wait before attempts 2, 3, 4 (the last value repeats beyond that), and how many attempts in all |
 | `CA_FILE` | `keys/certs/ca.pem` (compose `/keys/certs/ca.pem`) | Extra trust root for an HTTPS target. Unreadable is logged, not fatal |
-| `ACI_WEBHOOK_CONNECTED` | `true` | Starting state of the delivery switch, the default environment's: `false`, `0`, `off` or `no` start it disconnected |
+| `ACI_WEBHOOK_CONNECTED` | `false` | Starting state of the delivery switch, the default environment's: `true`, `1`, `on` or `yes` start it connected. Off, its notifications are recorded `held`: the receiver stand-in is a second listener once a platform is plugged in |
 | `SIM_CONTROL_LISTEN`, `SIM_CONTROL_ALLOW` | `LISTEN`'s port plus 1000 (`:9087`), empty (any caller) | The control port, and who may call it |
 | `LAB_CLOCK_URL` | unset (compose `http://clock:8096/clock`) | The payload's `timestamp` and the record's `created_at` follow the lab clock |
 

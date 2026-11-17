@@ -42,10 +42,19 @@ type aciSentRecord struct {
 // (section 6) so this settles fast and deterministically within the lab
 // network -- a real buddy settle-aci-webhook is the intended eventual
 // consumer (docs/local-domains.md), not exercised here.
+//
+// That delivery is a stand-in's wiring, which starts off: the scenario
+// switches it on through the lab API for its run and puts it back as it
+// found it, so a lab with a platform plugged in is left as it was.
 func AciPaymentNotification() Scenario {
 	return Scenario{
 		Name: "aci-payment-notification",
 		Run: func(ctx context.Context, env *Env, state *State) error {
+			restore, err := connectACI(ctx, env)
+			if err != nil {
+				return err
+			}
+			defer restore()
 			txID := fmt.Sprintf("harness-tx-%d", time.Now().UnixNano())
 			req := map[string]string{
 				"merchant_transaction_id": txID,
@@ -98,4 +107,39 @@ func AciPaymentNotification() Scenario {
 			return nil
 		},
 	}
+}
+
+// aciSwitch is ACI's delivery switch (GET/POST /sim/connected).
+type aciSwitch struct {
+	Connected bool   `json:"connected"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// connectACI switches ACI's webhook delivery on through the lab API, and
+// returns what puts it back as it was.
+func connectACI(ctx context.Context, env *Env) (restore func(), err error) {
+	var was aciSwitch
+	if status, err := env.Lab.Get(ctx, Sim("aci", "connected"), &was); err != nil || status != 200 {
+		return nil, fmt.Errorf("aci GET /sim/connected: %d %v", status, err)
+	}
+	if was.Connected {
+		return func() {}, nil
+	}
+	set := func(ctx context.Context, on bool, reason string) error {
+		var got aciSwitch
+		status, err := env.Lab.Post(ctx, Sim("aci", "connected"), map[string]any{"connected": on, "reason": reason}, &got)
+		if err != nil || status != 200 || got.Connected != on {
+			return fmt.Errorf("aci POST /sim/connected %v: %d %v", on, status, err)
+		}
+		return nil
+	}
+	if err := set(ctx, true, "e2e: aci-payment-notification"); err != nil {
+		return nil, err
+	}
+	return func() {
+		// Put back even when the scenario's own context is done.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = set(ctx, false, "e2e: aci-payment-notification done")
+	}, nil
 }

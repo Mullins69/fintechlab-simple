@@ -224,11 +224,21 @@ func main() {
 	// this is a convenience, and every field on it is one the real API
 	// would have required. On the first start only: after that it is the
 	// state file's, with whatever the platform did to it since.
+	//
+	// It is the receiver stand-in's, so it is seeded inactive, as every
+	// stand-in's wiring starts off: with a platform plugged in, an active
+	// one is a second listener taking every batch.
+	// BC_SEED_SUBSCRIPTION_ACTIVE=true seeds it active, for developing the
+	// lab with no platform (or make stand-ins-on, live).
+	seedStatus := bankingcircle.StatusInactive
+	if on, _ := strconv.ParseBool(env("BC_SEED_SUBSCRIPTION_ACTIVE", "false")); on {
+		seedStatus = bankingcircle.StatusActive
+	}
 	seed := func() error {
 		seeded, err := a.subs.Create(bankingcircle.CreateParams{
 			Endpoint:                   dest,
 			EncryptionKey:              string(notifKey),
-			Status:                     bankingcircle.StatusActive,
+			Status:                     seedStatus,
 			Email:                      env("BC_SEED_SUBSCRIPTION_EMAIL", "alerts@fintechlab-simple.local"),
 			MaxNotificationsPerMessage: envInt("BC_SEED_BATCH_SIZE", bankingcircle.MinNotificationsPerMessage),
 		})
@@ -250,8 +260,8 @@ func main() {
 				return fmt.Errorf("seed subscription event %s: %w", et, err)
 			}
 		}
-		log.Printf("banking-circle: seeded subscription %s -> %s (batch=%d, retries=%d, time_scale=%g)",
-			seeded.ID, dest, seeded.MaxNotificationsPerMessage,
+		log.Printf("banking-circle: seeded subscription %s -> %s (active=%v, batch=%d, retries=%d, time_scale=%g)",
+			seeded.ID, dest, seeded.IsActive, seeded.MaxNotificationsPerMessage,
 			deliveryCfg.DeactivateAfterRetries, deliveryCfg.TimeScale)
 		return nil
 	}

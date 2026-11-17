@@ -138,9 +138,12 @@ func main() {
 		bcInternalURL:       bcInternalURL,
 		bcInternalClient:    &http.Client{Timeout: 5 * time.Second},
 		sgaAccounts:         sgaAccounts,
+		// Off unless asked for: with a platform plugged in, a stand-in that
+		// pulls and pays the same files pays every outlet twice. It is for
+		// developing the lab with no platform (make stand-ins-on).
 		wiring: labswitch.FromEnv("settlement",
 			"pulls Worldline's files on a timer and pays outlets at the daily cutoff",
-			env("SETTLEMENT_CONNECTED", "true")),
+			env("SETTLEMENT_CONNECTED", "false")),
 	}
 
 	go a.runCutoffLoop(cutoff)

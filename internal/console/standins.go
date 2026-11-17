@@ -42,10 +42,10 @@ type StandInInfo struct {
 	// Plays is the part of the platform it stands in for, and who calls
 	// it: the sentence that says whether a developer needs it at all.
 	Plays string `json:"plays"`
-	// StartsOff is how to have it start disconnected — an environment
-	// variable read at start-up, so it takes a restart. Empty when there is
-	// no wiring to switch.
-	StartsOff string `json:"starts_off,omitempty"`
+	// StartsOn is how to have it start connected — every stand-in's wiring
+	// starts off — set where it is read at start-up, so it takes a restart.
+	// Empty when there is no wiring to switch.
+	StartsOn string `json:"starts_on,omitempty"`
 }
 
 // standInsShown is whether stand-in cards start shown. They are hidden by

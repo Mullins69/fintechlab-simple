@@ -3370,7 +3370,7 @@ function standInsConfig() {
     const show = `<button class="ghost small" data-action="standin" data-id="${esc(v.id)}" data-shown="${v.shown ? 'false' : 'true'}">${v.shown ? 'Hide card' : 'Show card'}</button>`;
     return `<tr>
       <td>${esc(shortName(v.name))}<div class="hint">${v.shown ? 'card shown' : 'card hidden'}${v.set_by ? ` · set by <span class="mono">${esc(v.set_by)}</span>` : ''}</div></td>
-      <td>${esc(v.plays || '')}${v.starts_off ? `<div class="hint">Start it disconnected: <span class="mono">${esc(v.starts_off)}</span> — read at start-up, so it takes a restart (<span class="mono">make up</span>).</div>` : ''}</td>
+      <td>${esc(v.plays || '')}${v.starts_on ? `<div class="hint">Off unless connected here. Start it connected: <span class="mono">${esc(v.starts_on)}</span> — read at start-up, so it takes a restart (<span class="mono">make up</span>); or <span class="mono">make stand-ins-on</span> after one.</div>` : ''}</td>
       <td>${pill}${wiring}</td>
       <td class="actions">${toggle}</td>
       <td class="actions">${show}</td>

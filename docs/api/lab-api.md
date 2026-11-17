@@ -162,7 +162,7 @@ health probe. What the Vendors, Platform and Verification views draw.
   lapsed one not answering, is reported `unknown` with `detail`
   `registration stopped` / `registration lapsed`.
 - A stand-in also carries `stand_in`: `shown`, `set_by`, `set_at`,
-  `plays`, `starts_off`.
+  `plays`, `starts_on`.
 - `control_url` is the service's control port (`base_url`'s port plus
   1000, plain HTTP): every `/sim/*` route and its own `GET /health`. It is
   where the lab API reaches the service, with no vendor login. A plugin has
@@ -345,10 +345,10 @@ from the services that own it.
 {"stand_ins": [
    {"id": "settlement", "name": "Settlement (platform stand-in)", "shown": false,
     "set_by": "lab-api", "set_at": "…", "plays": "…",
-    "starts_off": "SETTLEMENT_CONNECTED=false on the settlement service",
-    "state": "connected",
+    "starts_on": "SETTLEMENT_CONNECTED=true on the settlement service",
+    "state": "disconnected",
     "connections": [{"id": "timer", "label": "Worldline pull and cutoff payouts",
-                     "connected": true, "detail": "…"}]},
+                     "connected": false, "detail": "…"}]},
    {"id": "receiver", …,
     "connections": [{"id": "banking-circle", "label": "Banking Circle notifications", …},
                     {"id": "aci", "label": "ACI webhooks", …}]},
