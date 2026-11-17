@@ -1639,8 +1639,9 @@ still be returned or reversed.
  "total": 1016}
 ```
 
-At most 20 are listed; `total` counts every outgoing payment. Incoming
-payments are left out: a return shows as the payout's `returned_by`.
+Every outgoing payment is listed, however many a run made; `total` is how
+many. Incoming payments are left out: a return shows as the payout's
+`returned_by`.
 `can_return` and `can_reverse` are true only for an
 `OutgoingPaymentProcessed` payout not already returned. `reference` is
 Banking Circle's `paymentReferenceNumber`; `external_ref` is the payout's

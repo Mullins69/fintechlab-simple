@@ -995,13 +995,11 @@ type payoutView struct {
 	CanReverse  bool   `json:"can_reverse"`
 }
 
-// payoutsShown is how many payouts the card lists, newest first. The rest
-// are counted, not dropped silently.
-const payoutsShown = 20
-
-// bcPayouts lists Banking Circle's outgoing payments, newest first, for the
-// card's Return and Reverse buttons. Incoming payments are left out: a
-// return is one, and it shows up as the payout's returned_by instead.
+// bcPayouts lists every one of Banking Circle's outgoing payments, newest
+// first, for the card's Return and Reverse buttons. All of them: one large
+// settlement pays every outlet, and a list that showed the newest twenty
+// hid most of a run's payouts behind a count. Incoming payments are left
+// out: a return is one, and it shows up as the payout's returned_by instead.
 func (a *app) bcPayouts(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := reqContext(r)
 	defer cancel()
@@ -1041,11 +1039,7 @@ func (a *app) bcPayouts(w http.ResponseWriter, r *http.Request) {
 		}
 		return out[i].ID > out[j].ID
 	})
-	total := len(out)
-	if len(out) > payoutsShown {
-		out = out[:payoutsShown]
-	}
-	httputilx.WriteJSON(w, 200, map[string]any{"payouts": out, "total": total})
+	httputilx.WriteJSON(w, 200, map[string]any{"payouts": out, "total": len(out)})
 }
 
 // bcPayoutAction returns or reverses one payout through the vendor's own

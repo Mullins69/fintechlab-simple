@@ -527,6 +527,13 @@ input:focus, select:focus, textarea:focus {
   max-height: 340px; overflow-y: auto; overflow-x: hidden;
   margin-top: 10px; border-top: 1px solid var(--border-soft);
 }
+/* A table in a log card scrolls the same way, both directions, its header
+   held at the top: one settlement can pay hundreds of outlets. */
+.log-table {
+  max-height: 340px; overflow: auto;
+  margin-top: 10px; border-top: 1px solid var(--border-soft);
+}
+.log-table thead th { position: sticky; top: 0; z-index: 1; background: var(--panel-2); }
 .log-row {
   display: flex; align-items: baseline; gap: 10px;
   padding: 6px 8px 6px 7px;

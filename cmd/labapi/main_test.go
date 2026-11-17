@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1315,5 +1316,42 @@ func TestDeleteAndResetAreBankingCirclesOwn(t *testing.T) {
 	}
 	if strings.Join(fake.calls, "\n") != strings.Join(want, "\n") {
 		t.Errorf("the bank was called with\n  %s\nwant\n  %s", strings.Join(fake.calls, "\n  "), strings.Join(want, "\n  "))
+	}
+}
+
+// TestEveryPayoutOfARunIsListed: one large settlement pays every outlet, so
+// the card lists all of a run's payouts, newest first, not the newest
+// twenty with the rest behind a count.
+func TestEveryPayoutOfARunIsListed(t *testing.T) {
+	const run = 57 // a run of 56 outlets and the platform's own fee
+	var payments []map[string]string
+	for i := 0; i < run; i++ {
+		payments = append(payments, map[string]string{
+			"id": fmt.Sprintf("bcp_%03d", i), "state": "OutgoingPaymentProcessed", "amount": "1.00", "currency": "EUR",
+			"createdAt": fmt.Sprintf("2026-11-17T21:%02d:%02dZ", i/60, i%60),
+		})
+	}
+	body, _ := json.Marshal(map[string]any{"payments": payments})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+	a := testApp(t, srv)
+	a.bc.BaseURL = srv.URL
+
+	w := call(t, a, http.MethodGet, "/v1/banking-circle/payouts", "")
+	var got struct {
+		Payouts []payoutView `json:"payouts"`
+		Total   int          `json:"total"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("%v: %s", err, w.Body.String())
+	}
+	if len(got.Payouts) != run || got.Total != run {
+		t.Fatalf("listed %d of total %d, want all %d", len(got.Payouts), got.Total, run)
+	}
+	if got.Payouts[0].ID != fmt.Sprintf("bcp_%03d", run-1) || got.Payouts[run-1].ID != "bcp_000" {
+		t.Errorf("first %s, last %s: want newest first", got.Payouts[0].ID, got.Payouts[run-1].ID)
 	}
 }

@@ -943,7 +943,9 @@ Rules, and they are the whole component:
   is not a log line.
 - **The body scrolls, the card does not grow.** `max-height: 340px` with
   its own `overflow-y`, so a hundred rows never push the rest of the card
-  off the screen.
+  off the screen. A table in a log card (`.log-table`) scrolls the same
+  way, sideways too, with its header held at the top; like a log's rows it
+  carries `data-keep-scroll`, so a poll leaves it where it was read.
 - **Say when the list is a window.** "Showing the last 100 of 4000" under
   the rows; a ring buffer that silently drops history is a ring buffer
   people misread.

@@ -1263,14 +1263,13 @@ function payoutsPanel(s) {
         flagged <span class="mono">return</span>. <b>Reverse</b> is the scheme undoing it:
         the payout becomes reversed, with a second booking. Only a processed payout that
         has not come back can be either, so only those rows have buttons.</div>
-      ${payouts.length ? `<div class="table-scroll"><table>
+      ${payouts.length ? `<div class="table-scroll log-table" data-keep-scroll="${esc(id)}"><table>
         <thead><tr>
           <th>Payment</th><th>Reference</th><th>External ref</th><th class="num">Amount</th>
           <th>State</th><th class="actions"></th><th class="actions"></th>
         </tr></thead>
         <tbody>${rows}</tbody>
-      </table></div>
-      ${d.total > payouts.length ? `<div class="log-foot">Showing the newest ${payouts.length} of ${d.total}.</div>` : ''}`
+      </table></div>`
       : `<div class="empty">No payouts yet. A settlement run sends them here through B4B —
           start one from the platform's card on the Platform view.</div>`}
     </div>`;
