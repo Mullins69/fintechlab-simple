@@ -137,6 +137,9 @@ func (s *sim) putCustomer(c tenant.Customer, _ bool) error {
 		e.acq.setIdentifier(ident)
 		return nil
 	}
+	// Nothing of a new environment's is publishing yet: what a process
+	// stopped mid-publish left in its staging folder can go.
+	sweepStaging(root)
 	t.envs[c.Env] = s.newEnv(c.Env, root, ident)
 	return nil
 }

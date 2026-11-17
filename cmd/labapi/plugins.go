@@ -216,10 +216,11 @@ func (a *app) clockLock() string {
 // bytes through: it streams them, so a million-line file is never held in
 // the console's memory, and it stores nothing.
 
-// uploadLimit is the largest file the console passes on,
-// CONSOLE_UPLOAD_MAX_MB (default 512).
+// uploadLimit is the largest file the lab API takes or passes on:
+// CONSOLE_UPLOAD_MAX_MB, else LAB_MAX_FILE_MB -- the one setting Worldline's
+// publish bound reads too -- else 512.
 func uploadLimit() int64 {
-	mb, err := strconv.ParseInt(env("CONSOLE_UPLOAD_MAX_MB", "512"), 10, 64)
+	mb, err := strconv.ParseInt(env("CONSOLE_UPLOAD_MAX_MB", env("LAB_MAX_FILE_MB", "512")), 10, 64)
 	if err != nil || mb <= 0 {
 		mb = 512
 	}

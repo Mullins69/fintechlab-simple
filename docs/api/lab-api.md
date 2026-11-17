@@ -694,8 +694,11 @@ environment's safeguarding account, as Worldline's morning does.
 
 Each file is streamed from disk to Worldline, never held in the lab API,
 and has up to 15 minutes. Worldline takes a file up to its own
-`WORLDLINE_MAX_FILE_MB` (512 by default, as `CONSOLE_UPLOAD_MAX_MB`); a
-larger one is that file's result `error`, `worldline: HTTP 413: …`.
+`WORLDLINE_MAX_FILE_MB` (unset, `LAB_MAX_FILE_MB`, the setting the lab
+API's `CONSOLE_UPLOAD_MAX_MB` falls back to as well; 512 by default); a
+larger one is that
+file's result `error`, `worldline: HTTP 413: …`, answered before any of
+it is sent (the lab API asks first, `Expect: 100-continue`).
 
 **Answers** — `200 {"env", "published": 2, "results": [{…Worldline's
 answer…, "file"}, …], "note"}`: each result is Worldline's answer (its
@@ -703,7 +706,9 @@ answer…, "file"}, …], "note"}`: each result is Worldline's answer (its
 published under the environment's settlement identifier and the moment's
 timestamp, since a platform's poll takes only its own identifier's files of
 its own day) with `file`, the lab's copy; a result with `error` for
-a file that did not publish; `502` when none did; `400` for a file the parser refuses;
+a file that did not publish; a result with `warning` for one Worldline
+published (`2xx`) whose answer could not be read, counted as published so
+a retry does not publish and wire it twice; `502` when none did; `400` for a file the parser refuses;
 `404` for one the environment does not have; `409` for two of one
 currency.
 

@@ -102,6 +102,7 @@ func main() {
 	}
 	a.reg = reg
 	a.dataDir = filepath.Dir(stateFile)
+	a.sweepTmp()
 
 	// The lab's database, beside the registry on the lab API's volume.
 	if path := env("LAB_DB", filepath.Join(filepath.Dir(stateFile), "lab.db")); path != "off" {

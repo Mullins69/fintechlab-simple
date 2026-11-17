@@ -1,0 +1,15 @@
+# Pass this to a play to raise the largest settlement file the lab API takes
+# and Worldline publishes, in MB (512 when unset). Put a number in first:
+#
+#   podman kube play --replace --configmap lab-max-file-mb.yaml fintechlab.yaml
+#   make pod-up LAB_MAX_FILE_MB=1024                 # the same, from a checkout
+#
+# Both read the one setting, so a file the lab takes is one Worldline
+# publishes. A file is streamed and staged on disk, never held whole: this
+# bounds disk, not memory.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fintechlab-lab-max-file-mb
+data:
+  lab-max-file-mb: ""

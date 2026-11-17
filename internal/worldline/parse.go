@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -393,8 +392,9 @@ func FilenameSlot(name string) string {
 }
 
 // SettlementSummary is what a settlement file says about itself, read
-// without holding its rows: its Settlement row, the MIDs it pays, and how
-// many batches, transactions and chargebacks it carries.
+// without holding its rows: its Settlement row, the MIDs it pays -- each
+// once, in the order the file first names it, as ParsedFile.MIDs lists
+// them -- and how many batches, transactions and chargebacks it carries.
 type SettlementSummary struct {
 	Meta         BamboraMeta
 	MIDs         []string
@@ -470,6 +470,5 @@ func SummarizeSettlementFile(r io.Reader) (SettlementSummary, error) {
 	if s.Meta.SettlementCurrency == "" {
 		return s, fmt.Errorf("worldline: not a settlement file: its %s row names no SETTLEMENT_CURRENCY", bamboraRecordTypeSettlement)
 	}
-	sort.Strings(s.MIDs)
 	return s, nil
 }

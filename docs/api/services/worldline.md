@@ -48,7 +48,7 @@ plain HTTP rather than SFTP.
 | `WORLDLINE_MORNING_FILE_AT`, `WORLDLINE_MORNING_FILE_WINDOW` | `08:00`, `2h` | The morning slot fires at that time plus a per-day jitter inside the window, deterministic for a given date |
 | `WORLDLINE_AFTERNOON_FILE_AT` | `15:30` | The afternoon slot, no jitter |
 | `WORLDLINE_SETTLEMENT_DELAY` | `24h` | A scheduled run settles the single day this long before now (T+1) |
-| `WORLDLINE_MAX_FILE_MB` | `512` | The largest file [`POST /sim/settlement-files/publish`](#post-simsettlement-filespublish) takes (`413` beyond). It is staged on disk (`TMPDIR`, `/tmp` in the image) and read row by row, never held whole, so this bounds disk, not memory. Keep it at least the lab API's `CONSOLE_UPLOAD_MAX_MB`, or a file the lab took is one Worldline refuses |
+| `WORLDLINE_MAX_FILE_MB` | `512` | The largest file [`POST /sim/settlement-files/publish`](#post-simsettlement-filespublish) takes (`413` beyond). It is staged on disk (`TMPDIR`, `/tmp` in the image) and read row by row, never held whole, so this bounds disk, not memory. Unset, it is `LAB_MAX_FILE_MB`, the one setting the lab API's upload bound reads too (compose and the pod pass it from the host), so a file the lab takes is one Worldline publishes |
 | `BC_INTERNAL_URL` | empty (compose `http://banking-circle:8095`) | Banking Circle's bridge, for the lump sum. Empty: lump sums report `not configured` |
 | `BC_SAFEGUARDING_ACCOUNT_ID_EUR`, `BC_SAFEGUARDING_ACCOUNT_ID_GBP` | empty | The default environment's: a currency's lump sum is wired only when its account is set; no other currency is read. Every other environment's accounts are its own ([Environments](#environments)) |
 | `WORLDLINE_ENROLMENT_DELAY` | `30s` | How old an enrolment batch must be before it is answered, by file modification time on the wall clock |
@@ -90,6 +90,11 @@ permissions, so a client can delete a settlement file.
 | `to_WLNORDIC/` | A second copy of every settlement file, and the platform's enrolment batches | The cycle; the platform |
 | `from_WLNORDIC/` | Enrolment receipts | The enrolment desk |
 | `disputes/download/` | Nothing: created at start, never written | — |
+
+Beside them, the jail holds a hidden `.staging/` folder, the lab's own: a
+settlement file is written there in full before it is renamed into
+`download/` and `to_WLNORDIC/`, so neither ever holds part of one. A
+platform polling those folders never needs to look in it.
 
 `download/` and `to_WLNORDIC/` are the two real path conventions for the
 same content. The server never deletes from either, except on a lab reset
@@ -581,7 +586,9 @@ is kept.
   no `/`, `\`, `..` or control character, at most 255 bytes. `wire`, `true` or `false` (default `false`). `env`, whose
   folder (the default's when none; `*` is `400`).
 - Body: the file, plain text, at most `WORLDLINE_MAX_FILE_MB` (512 MiB;
-  `413` beyond, saying so).
+  `413` beyond, saying so). A file whose `Content-Length` is over it is
+  refused before any of it is read, so a caller that sends
+  `Expect: 100-continue` (the lab API does) sends none of it.
 - The body is staged on disk as it arrives, then read row by row with
   Worldline's own parser (`worldline.SummarizeSettlementFile`, which
   refuses what `worldline.ParseSettlementFile` refuses without holding
@@ -590,10 +597,14 @@ is kept.
   \"Settlement\" row"}` or an amount with three decimals. Then it is
   copied, plain as the cycle's files are, into `download/` and
   `to_WLNORDIC/` of the environment's jail under the name it is published
-  under, replacing a file of that name. Each copy is written under a
-  hidden `.{name}.*.partial` name beside it and renamed into place when
-  whole, as the cycle's files are, so a platform polling mid-publish
-  sees the whole file or none of it.
+  under, replacing a file of that name. Both copies are written first
+  into the jail's hidden `.staging/` folder, beside `download/` and
+  `to_WLNORDIC/` and never inside either, and each is renamed into its
+  folder when whole, as the cycle's files are: a platform polling
+  mid-publish sees the whole file or none of it, and no half-written file
+  under any name. Only the renames wait for a reset in flight, so a reset
+  never waits on a copy of hundreds of megabytes. What a stopped
+  Worldline left in `.staging/` goes when it starts again.
 - With `wire=true`, the file's total (its `SETTLEMENT_AMOUNT`) is wired as
   the morning slot wires its lump sum: to the environment's safeguarding
   account over Banking Circle's bridge, referenced `WORLDLINE SETTLEMENT

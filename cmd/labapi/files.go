@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/webduvet/fintechlab-simple/internal/atomicfile"
 	"github.com/webduvet/fintechlab-simple/internal/httputilx"
 	"github.com/webduvet/fintechlab-simple/internal/labdb"
 	"github.com/webduvet/fintechlab-simple/internal/money"
@@ -68,6 +70,26 @@ type settlementFile struct {
 // filesDir is the call's environment's folder for source.
 func (a *app) filesDir(ctx context.Context, source string) string {
 	return filepath.Join(a.dataDir, "files", scopeOf(ctx), source)
+}
+
+// tmpDir is where an upload or a cut is written before it is renamed into
+// its folder (internal/atomicfile): on the lab's volume beside every
+// environment's files, since a rename is only whole within one
+// filesystem, and in none of the folders a listing reads, so a file still
+// arriving is never listed. No environment id starts with a dot. What a
+// lab API that stopped mid-write left here goes at start-up (sweepTmp).
+func (a *app) tmpDir() string {
+	return filepath.Join(a.dataDir, "files", ".tmp")
+}
+
+// sweepTmp removes what a stopped upload or cut left in tmpDir. Call it at
+// start-up, before anything can be writing there.
+func (a *app) sweepTmp() {
+	if n, err := atomicfile.Sweep(a.tmpDir()); err != nil {
+		log.Printf("lab-api: sweep %s: %v", a.tmpDir(), err)
+	} else if n > 0 {
+		log.Printf("lab-api: removed %d file(s) a stopped upload or cut left in %s", n, a.tmpDir())
+	}
 }
 
 // removeEnvFiles takes an environment's settlement files off the lab's
@@ -148,6 +170,12 @@ func (a *app) listSettlementFiles(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, e := range entries {
+			// A name starting with a dot is never a settlement file of
+			// the lab's (validName refuses one): an older lab's
+			// half-written upload, say.
+			if strings.HasPrefix(e.Name(), ".") {
+				continue
+			}
 			st, err := e.Info()
 			if err != nil || !st.Mode().IsRegular() {
 				continue
@@ -173,16 +201,13 @@ func (a *app) uploadSettlementFile(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	tmp, err := os.CreateTemp(dir, ".upload-*")
+	tmp, err := atomicfile.Create(a.tmpDir())
 	if err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	defer os.Remove(tmp.Name())
+	defer tmp.Discard()
 	n, err := io.Copy(tmp, http.MaxBytesReader(w, r.Body, uploadLimit()))
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
 	var tooBig *http.MaxBytesError
 	switch {
 	case errors.As(err, &tooBig):
@@ -196,7 +221,7 @@ func (a *app) uploadSettlementFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := filepath.Join(dir, name)
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := tmp.Commit(path); err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
@@ -256,26 +281,18 @@ func (a *app) cutSettlementFile(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	tmp, err := os.CreateTemp(dir, ".cut-*")
+	tmp, err := atomicfile.Create(a.tmpDir())
 	if err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
-	defer os.Remove(tmp.Name())
-	_, err = io.Copy(tmp, resp.Body)
-	if cerr := tmp.Close(); err == nil {
-		err = cerr
-	}
-	if err != nil {
+	defer tmp.Discard()
+	if _, err := io.Copy(tmp, resp.Body); err != nil {
 		httputilx.Error(w, 502, "worldline: the file was cut short: "+err.Error())
 		return
 	}
 	path := filepath.Join(dir, name)
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		httputilx.Error(w, 500, err.Error())
-		return
-	}
-	if err := os.Rename(tmp.Name(), path); err != nil {
+	if err := tmp.Commit(path); err != nil {
 		httputilx.Error(w, 500, err.Error())
 		return
 	}
@@ -453,9 +470,16 @@ func (a *app) publishOne(ctx context.Context, name, path string, wire bool) (map
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("worldline: HTTP %d: %s", resp.StatusCode, controlError(resp))
 	}
+	// A 2xx is a published file, and perhaps a wired lump sum, whatever
+	// comes after it. An answer that cannot be read -- it lists every MID,
+	// and a file can name more than any bound -- must not read as a failure
+	// that a retry would publish, and wire, a second time.
 	out := map[string]any{}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("worldline: %w", err)
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxControlAnswer)).Decode(&out); err != nil {
+		out = map[string]any{
+			"name":    name,
+			"warning": "published, but Worldline's answer could not be read (" + err.Error() + "): list the SFTP folder for what it holds",
+		}
 	}
 	// Worldline names the file it published (a Worldline-named file gets
 	// the moment's timestamp); file is the lab's copy.
@@ -547,12 +571,21 @@ func (a *app) controlJSON(ctx context.Context, method, svc, path string, in, out
 // the other side, take minutes, not a JSON call's seconds.
 const fileCallTimeout = 15 * time.Minute
 
-// controlStream makes one call to a lab service's control port in the
-// call's environment (ctx names it) with body streamed as it is read, size
-// bytes long, and returns the answer for the caller to read and close. It
-// is a.client without its whole-call timeout: ctx bounds the call instead,
-// so a file's call can take as long as it needs.
-func (a *app) controlStream(ctx context.Context, method, svc, path, ctype string, body io.Reader, size int64, accept string) (*http.Response, error) {
+// maxControlAnswer bounds the JSON answer of a control port the lab API
+// reads: room for a listing of thousands, not a sim's runaway answer.
+const maxControlAnswer = 64 << 20
+
+// expectContinueOver is the body size from which a call to a control port
+// asks first whether the body is wanted (Expect: 100-continue): a service
+// that refuses it -- a file over Worldline's WORLDLINE_MAX_FILE_MB --
+// answers before any of it is sent, rather than closing the connection
+// under it, which the caller would read as a broken pipe instead of the
+// refusal.
+const expectContinueOver = 1 << 20
+
+// controlRequest is one call to a lab service's control port in the call's
+// environment (ctx names it), with body, size bytes long, as ctype.
+func (a *app) controlRequest(ctx context.Context, method, svc, path, ctype string, body io.Reader, size int64) (*http.Request, error) {
 	base := a.controlURL(svc)
 	if base == "" {
 		return nil, fmt.Errorf("%s has no control port", svc)
@@ -561,28 +594,46 @@ func (a *app) controlStream(ctx context.Context, method, svc, path, ctype string
 	if err != nil {
 		return nil, err
 	}
-	req.ContentLength = size
-	if ctype != "" {
-		req.Header.Set("Content-Type", ctype)
+	if body != nil {
+		req.ContentLength = size
+		if ctype != "" {
+			req.Header.Set("Content-Type", ctype)
+		}
+	}
+	return req, nil
+}
+
+// controlStream makes one call to a lab service's control port with body
+// streamed as it is read, size bytes long, and returns the answer for the
+// caller to read and close. It is a.client without its whole-call timeout:
+// ctx bounds the call instead, so a file's call can take as long as it
+// needs.
+func (a *app) controlStream(ctx context.Context, method, svc, path, ctype string, body io.Reader, size int64, accept string) (*http.Response, error) {
+	req, err := a.controlRequest(ctx, method, svc, path, ctype, body, size)
+	if err != nil {
+		return nil, err
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	if size > expectContinueOver {
+		req.Header.Set("Expect", "100-continue")
 	}
 	client := &http.Client{Transport: a.client.Transport, CheckRedirect: a.client.CheckRedirect}
 	return client.Do(req)
 }
 
+// controlCall makes one call to a lab service's control port with body as
+// ctype, and decodes a 2xx answer, bounded, into out; any other answer
+// comes back as its status and its error message.
 func (a *app) controlCall(ctx context.Context, method, svc, path, ctype string, body []byte, out any) (int, string, error) {
-	base := a.controlURL(svc)
-	if base == "" {
-		return 0, "", fmt.Errorf("%s has no control port", svc)
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, base+path, bytes.NewReader(body))
+	req, err := a.controlRequest(ctx, method, svc, path, ctype, rd, int64(len(body)))
 	if err != nil {
 		return 0, "", err
-	}
-	if body != nil {
-		req.Header.Set("Content-Type", ctype)
 	}
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -593,7 +644,7 @@ func (a *app) controlCall(ctx context.Context, method, svc, path, ctype string, 
 		return resp.StatusCode, controlError(resp), nil
 	}
 	if out != nil {
-		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, maxControlAnswer)).Decode(out); err != nil {
 			return resp.StatusCode, "", err
 		}
 	}

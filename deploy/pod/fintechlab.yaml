@@ -284,6 +284,16 @@ spec:
           value: "generate"
         - name: WORLDLINE_FIXTURE_DIR
           value: "/wlsftp-fixtures"
+        # The largest settlement file publish takes, in MB (512 when
+        # unset): one setting with the lab API's upload bound. From the
+        # ConfigMap deploy/pod/lab-max-file-mb.yaml defines (make pod-up
+        # LAB_MAX_FILE_MB=… does the same).
+        - name: LAB_MAX_FILE_MB
+          valueFrom:
+            configMapKeyRef:
+              name: fintechlab-lab-max-file-mb
+              key: lab-max-file-mb
+              optional: true
         - name: BC_INTERNAL_URL
           value: "http://banking-circle:8095"
         - name: BC_SAFEGUARDING_ACCOUNT_ID_EUR
@@ -509,6 +519,14 @@ spec:
           value: "/config/banking-circle.json"
         - name: CONSOLE_KEYS_DIR
           value: "/keys"
+        # The largest settlement file the lab takes, in MB: the same
+        # setting as Worldline's.
+        - name: LAB_MAX_FILE_MB
+          valueFrom:
+            configMapKeyRef:
+              name: fintechlab-lab-max-file-mb
+              key: lab-max-file-mb
+              optional: true
       volumeMounts:
         - name: keys
           mountPath: /keys

@@ -63,4 +63,46 @@ func TestPublishFromIsWholeOrNothing(t *testing.T) {
 			t.Errorf("after a failed publish %s holds %v, want only a.csv", d, entries)
 		}
 	}
+	if entries, _ := os.ReadDir(filepath.Join(root, DirStaging)); len(entries) != 0 {
+		t.Errorf("a failed publish left %v staged", entries)
+	}
+}
+
+// A staged file is in neither folder a platform lists, under any name,
+// until it is committed: a poll mid-publish finds nothing to take. Discard
+// takes it back.
+func TestAStagedFileIsInNoListedFolder(t *testing.T) {
+	root := t.TempDir()
+	content := strings.Repeat("row\n", 1000)
+	render := func(w io.Writer) error { _, err := io.WriteString(w, content); return err }
+
+	s, err := Stage(root, "c.csv", render)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range []string{DirDownload, DirToWLNordic} {
+		if entries, _ := os.ReadDir(filepath.Join(root, d)); len(entries) != 0 {
+			t.Fatalf("staged, not committed, and %s already holds %v", d, entries)
+		}
+	}
+	if name, err := s.Commit(); err != nil || name != "c.csv" {
+		t.Fatalf("commit: %q %v", name, err)
+	}
+	for _, d := range []string{DirDownload, DirToWLNordic} {
+		if got, _ := os.ReadFile(filepath.Join(root, d, "c.csv")); string(got) != content {
+			t.Errorf("%s/c.csv is %d bytes, want %d", d, len(got), len(content))
+		}
+	}
+
+	dropped, err := Stage(root, "d.csv", render)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dropped.Discard()
+	if entries, _ := os.ReadDir(filepath.Join(root, DirStaging)); len(entries) != 0 {
+		t.Errorf("a discarded file left %v staged", entries)
+	}
+	if _, err := os.Stat(filepath.Join(root, DirDownload, "d.csv")); !os.IsNotExist(err) {
+		t.Errorf("a discarded file was published: %v", err)
+	}
 }

@@ -75,7 +75,7 @@ func TestCutProducesOneFilePerCurrencyCoveringEveryMID(t *testing.T) {
 	if len(files) != 2 {
 		t.Fatalf("Cut produced %d files, want 2 (one per currency)", len(files))
 	}
-	byCcy := map[string]CutFile{}
+	byCcy := map[string]RenderedFile{}
 	for _, f := range files {
 		if _, dup := byCcy[f.Currency]; dup {
 			t.Fatalf("two files cut for currency %s", f.Currency)
@@ -115,7 +115,7 @@ func TestCutRoundTripsThroughTheParser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Cut: %v", err)
 	}
-	var eur CutFile
+	var eur RenderedFile
 	for _, f := range files {
 		if f.Currency == "EUR" {
 			eur = f
@@ -335,6 +335,11 @@ func TestTheSummaryReadsWhatTheParserReadsWithoutHoldingTheRows(t *testing.T) {
 		{ID: "b", MID: "M1", Currency: "EUR", AmountCents: 2500, Date: "2026-11-09"},
 		{ID: "c", MID: "M2", Currency: "EUR", AmountCents: 700, Date: "2026-11-09"},
 	}, "EUR", "2026-11-09", "2026-11-09", BamboraOptions{})
+	// The file names M2 first: the summary lists the MIDs in the file's
+	// order, as the parser does, not sorted.
+	if f.Batches[0].Transactions[0].AdditionalRef2 == "M1" {
+		f.Batches[0], f.Batches[1] = f.Batches[1], f.Batches[0]
+	}
 	var b bytes.Buffer
 	if err := f.WriteCSV(&b); err != nil {
 		t.Fatal(err)
@@ -350,7 +355,7 @@ func TestTheSummaryReadsWhatTheParserReadsWithoutHoldingTheRows(t *testing.T) {
 	if s.Meta != parsed.Meta {
 		t.Fatalf("meta: summary %+v, parser %+v", s.Meta, parsed.Meta)
 	}
-	if strings.Join(s.MIDs, ",") != "M1,M2" || s.Transactions != 3 || s.Batches != len(parsed.Batches) {
+	if strings.Join(s.MIDs, ",") != "M2,M1" || strings.Join(parsed.MIDs(), ",") != "M2,M1" || s.Transactions != 3 || s.Batches != len(parsed.Batches) {
 		t.Fatalf("summary %+v", s)
 	}
 	if _, err := SummarizeSettlementFile(strings.NewReader("just,some,text\n")); err == nil {
@@ -434,8 +439,7 @@ func TestCutCurrencyWritesWhatCutHolds(t *testing.T) {
 		if b.String() != string(want.Bytes) {
 			t.Errorf("%s: CutCurrency wrote\n%s\nCut holds\n%s", want.Currency, b.String(), want.Bytes)
 		}
-		want.Bytes = nil
-		if fmt.Sprint(got) != fmt.Sprint(want) {
+		if fmt.Sprint(got) != fmt.Sprint(want.CutFile) {
 			t.Errorf("%s: CutCurrency says %+v, Cut %+v", want.Currency, got, want)
 		}
 	}

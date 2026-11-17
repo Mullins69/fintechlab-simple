@@ -258,6 +258,11 @@ services:
       # -- which is how you test a parser against the genuine article.
       WORLDLINE_FILE_SOURCE: generate
       WORLDLINE_FIXTURE_DIR: /wlsftp-fixtures
+      # The largest settlement file publish takes, in MB (512 when unset):
+      # one setting with the lab API's upload bound, so a file the lab
+      # takes is one Worldline publishes. `LAB_MAX_FILE_MB=1024 make up`
+      # raises both.
+      LAB_MAX_FILE_MB: ${LAB_MAX_FILE_MB:-}
       # Worldline does not call Banking Circle in real life: the lump sum
       # simply arrives in the platform's safeguarding account, wired
       # bank-to-bank. This lab has no interbank rail, so the acquirer
@@ -556,6 +561,9 @@ services:
       # only the files a client needs (never a server's private key or the
       # CA's), from a fixed list in internal/console/connect.go.
       CONSOLE_KEYS_DIR: /keys
+      # The largest settlement file the lab takes, in MB (512 when unset):
+      # one setting with Worldline's publish bound.
+      LAB_MAX_FILE_MB: ${LAB_MAX_FILE_MB:-}
     volumes:
       - ${LAB_KEYS_DIR:-./keys}:/keys:ro
       - ./config:/config:ro

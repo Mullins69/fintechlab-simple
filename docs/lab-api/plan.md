@@ -413,9 +413,12 @@ made, listed, cut and published without being held in memory. The lab API
 streams a file to Worldline's publish from its volume, and Worldline's
 render to its volume (`Accept: text/csv`), each call with up to 15
 minutes. Worldline stages a published file on disk, checks it row by
-row, and renames each copy into its folder whole. It takes a file up to
-`WORLDLINE_MAX_FILE_MB` (512 by default, as `CONSOLE_UPLOAD_MAX_MB`). Its
-run history keeps what a file settled, not its bytes. What is still held
+row, writes each copy into the jail's hidden `.staging/` folder and only
+then renames it into its folder whole; the scheduled cycle writes its
+files the same way, as it renders them. It takes a file up to
+`WORLDLINE_MAX_FILE_MB`, and the lab API one up to `CONSOLE_UPLOAD_MAX_MB`;
+unset, both are `LAB_MAX_FILE_MB`, 512 by default. Its run
+history keeps what a file settled, not its bytes. What is still held
 whole is Worldline's own trading: the cut and the scheduled cycle render
 from the transactions it keeps in memory, so a cut of millions of
 transactions needs Worldline to hold those millions. A file from the

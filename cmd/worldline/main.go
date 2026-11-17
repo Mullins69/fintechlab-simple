@@ -341,6 +341,17 @@ func envDuration(k string, def time.Duration) time.Duration {
 	return d
 }
 
+// sweepStaging removes what a publish left in root's staging folder when
+// the process stopped mid-way (wlsftp.Stage). Call it before anything of
+// root's can publish.
+func sweepStaging(root string) {
+	if n, err := wlsftp.SweepStaging(root); err != nil {
+		log.Printf("worldline: sweep %s's staging folder: %v", root, err)
+	} else if n > 0 {
+		log.Printf("worldline: removed %d file(s) a stopped publish left staged in %s", n, root)
+	}
+}
+
 // startWorldlineSFTP brings up mock-Worldline's acquiring side: the real
 // SSH/SFTP+PGP server, the transaction store behind it, and the daily
 // settlement cycle that publishes into it.
@@ -362,6 +373,7 @@ func (s *sim) startWorldlineSFTP() string {
 	if err := wlsftp.EnsureLayout(root); err != nil {
 		log.Fatalf("worldline: sftp layout: %v", err)
 	}
+	sweepStaging(root)
 	// Every other environment's jail is a folder of its own here, outside
 	// the default's root.
 	envRoot := env("WORLDLINE_SFTP_ENV_ROOT", defaultEnvRoot(root))

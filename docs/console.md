@@ -758,7 +758,7 @@ working:
 | `CONSOLE_BC_DELIVERY_CONFIG` | `config/banking-circle.json` | the delivery table to display |
 | `CONSOLE_KEYS_DIR` | `keys` | the lab's keys directory, for the connect-your-platform downloads |
 | `CONSOLE_BC_INTERNAL_URL` | `http://127.0.0.1:8095` | Banking Circle's internal bridge, for *Fund safeguarding accounts* |
-| `CONSOLE_UPLOAD_MAX_MB` | `512` | the largest settlement file the lab API passes on to a platform |
+| `CONSOLE_UPLOAD_MAX_MB` | `512` | the largest settlement file the lab API takes or passes on to a platform. Unset, it is `LAB_MAX_FILE_MB` (512), the one setting Worldline's publish bound reads too: `LAB_MAX_FILE_MB=1024 make up` raises both |
 | `CONSOLE_URL_CLOCK` | `http://127.0.0.1:8096` | the lab clock, for the clock card and `/v1/clock` |
 | `CONSOLE_STAND_INS_SHOWN` | `false` | start the stand-ins' cards shown rather than hidden |
 | `CA_FILE`, `CLIENT_CERT`, `CLIENT_KEY` | `keys/certs/…` | mTLS material for Banking Circle |

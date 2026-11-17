@@ -84,13 +84,17 @@ const (
 	FileSourceFixture FileSource = "fixture"
 )
 
-// CutFile is one settlement file the cycle produced.
+// CutFile is one settlement file the cycle produced: what it settles, not
+// its bytes. It is what a cycle run keeps in its history (a file of
+// millions of transactions is hundreds of megabytes the history has no use
+// for); the bytes are a Cutting's to write, or a RenderedFile's.
 type CutFile struct {
 	Filename string `json:"filename"`
 	Slot     string `json:"slot"`
-	// MIDs lists every submerchant with rows in this file. A settlement
-	// file is per currency, not per merchant -- see
-	// GenerateSettlementFile for why the filename carries no merchant.
+	// MIDs lists every submerchant with rows in this file, in the order
+	// the file first names them. A settlement file is per currency, not
+	// per merchant -- see GenerateSettlementFile for why the filename
+	// carries no merchant.
 	MIDs     []string `json:"mids"`
 	Currency string   `json:"currency"`
 	// AmountCents is the file's own SETTLEMENT_AMOUNT -- the figure the
@@ -99,79 +103,107 @@ type CutFile struct {
 	Items       int    `json:"items"`
 	FromDate    string `json:"from_date"`
 	ToDate      string `json:"to_date"`
-	Bytes       []byte `json:"-"`
+}
+
+// Cutting is a file the cycle cuts, not yet written: what it settles, and
+// Write, which renders it to w as it goes. A file of millions of
+// transactions goes to w row by row rather than being held whole first.
+type Cutting struct {
+	CutFile
+	Write func(w io.Writer) error
+}
+
+// RenderedFile is a cut file with its bytes, as Cut holds it.
+type RenderedFile struct {
+	CutFile
+	Bytes []byte
 }
 
 // Cut builds every settlement file for the given slot covering
-// [fromDate, toDate], one per submerchant per currency. It does not write
-// anything: the caller decides where the bytes go (PGP-encrypted onto the
-// SFTP server, in the normal case), which keeps this testable without a
-// filesystem.
-func Cut(store *Store, cfg CycleConfig, slot, fromDate, toDate string, at time.Time) ([]CutFile, error) {
-	if cfg.Source == FileSourceFixture {
-		return cutFromFixtures(cfg, slot, fromDate, toDate, at)
+// [fromDate, toDate], one per currency, and holds each one's bytes. It
+// does not write anything, which keeps it testable without a filesystem;
+// the cycle itself writes each file as it renders it (CutStreams).
+func Cut(store *Store, cfg CycleConfig, slot, fromDate, toDate string, at time.Time) ([]RenderedFile, error) {
+	cuts, err := CutStreams(store, cfg, slot, fromDate, toDate, at)
+	if err != nil {
+		return nil, err
 	}
-	// One file per currency, covering every submerchant that traded --
-	// the shape the real filename pattern implies (it carries no
-	// merchant). The platform splits it per MID on the way in.
-	var out []CutFile
-	txns := store.All()
-	for _, ccy := range store.CurrenciesInRange("", fromDate, toDate) {
-		f, write, ok := cutGenerated(txns, cfg, slot, ccy, fromDate, toDate, at)
-		if !ok {
-			continue
-		}
+	out := make([]RenderedFile, 0, len(cuts))
+	for _, c := range cuts {
 		var buf bytes.Buffer
-		if err := write(&buf); err != nil {
-			return nil, fmt.Errorf("worldline: render %s settlement file: %w", ccy, err)
+		if err := c.Write(&buf); err != nil {
+			return nil, fmt.Errorf("worldline: render %s: %w", c.Filename, err)
 		}
-		f.Bytes = buf.Bytes()
-		out = append(out, f)
+		out = append(out, RenderedFile{CutFile: c.CutFile, Bytes: buf.Bytes()})
 	}
 	return out, nil
 }
 
-// CutCurrency is Cut for one currency, with the file's bytes left to be
-// written: what it settles, and write, which writes the file to w as Cut
-// would have rendered it, byte for byte. A file of millions of
-// transactions goes to w as it is rendered rather than being held whole
-// first. ok is false when nothing in ccy settles in [fromDate, toDate].
+// CutStreams is Cut with each file left to be written: the files of the
+// slot covering [fromDate, toDate], one per currency, each with what it
+// settles and Write to render it.
+func CutStreams(store *Store, cfg CycleConfig, slot, fromDate, toDate string, at time.Time) ([]Cutting, error) {
+	if cfg.Source == FileSourceFixture {
+		return cutFromFixtures(cfg, slot, fromDate, toDate, at)
+	}
+	// One settlement file per currency, covering every submerchant -- the
+	// shape the real filename pattern implies (it carries no merchant).
+	// The platform splits it per MID on the way in.
+	var out []Cutting
+	txns := store.All()
+	for _, ccy := range store.CurrenciesInRange("", fromDate, toDate) {
+		if c, ok := cutGenerated(txns, cfg, slot, ccy, fromDate, toDate, at); ok {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+// CutCurrency is CutStreams for one currency: what the file settles, and
+// write, which writes it to w as Cut would have rendered it, byte for
+// byte. ok is false when nothing in ccy settles in [fromDate, toDate].
 //
 // From fixtures, the file is the first of the slot's that is a settlement
-// file in ccy, read to learn its currency, MIDs and total.
+// file in ccy, read row by row to learn its currency, MIDs and total.
 func CutCurrency(store *Store, cfg CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (f CutFile, write func(w io.Writer) error, ok bool, err error) {
 	ccy = strings.ToUpper(ccy)
 	if cfg.Source != FileSourceFixture {
-		f, write, ok = cutGenerated(store.All(), cfg, slot, ccy, fromDate, toDate, at)
-		return f, write, ok, nil
+		c, ok := cutGenerated(store.All(), cfg, slot, ccy, fromDate, toDate, at)
+		return c.CutFile, c.Write, ok, nil
 	}
-	files, err := cutFromFixtures(cfg, slot, fromDate, toDate, at)
+	cuts, err := cutFromFixtures(cfg, slot, fromDate, toDate, at)
 	if err != nil {
 		return CutFile{}, nil, false, err
 	}
-	for _, f := range files {
-		sum, err := SummarizeSettlementFile(bytes.NewReader(f.Bytes))
+	for _, c := range cuts {
+		sum, err := summarizeCutting(c)
 		if err != nil || strings.ToUpper(sum.Meta.SettlementCurrency) != ccy {
 			continue
 		}
-		f.Currency, f.MIDs = ccy, sum.MIDs
-		f.AmountCents, f.Items = sum.Meta.SettlementAmount, sum.Meta.NumberOfItems
-		b := f.Bytes
-		f.Bytes = nil
-		return f, func(w io.Writer) error { _, err := w.Write(b); return err }, true, nil
+		c.Currency, c.MIDs = ccy, sum.MIDs
+		c.AmountCents, c.Items = sum.Meta.SettlementAmount, sum.Meta.NumberOfItems
+		return c.CutFile, c.Write, true, nil
 	}
 	return CutFile{}, nil, false, nil
 }
 
-// cutGenerated is the file of one currency the cycle generates from txns,
-// with write to render it; ok is false when it would have no items.
-func cutGenerated(txns []Transaction, cfg CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (CutFile, func(io.Writer) error, bool) {
+// summarizeCutting reads what c writes as a settlement file, row by row.
+func summarizeCutting(c Cutting) (SettlementSummary, error) {
+	pr, pw := io.Pipe()
+	go func() { pw.CloseWithError(c.Write(pw)) }()
+	defer pr.Close()
+	return SummarizeSettlementFile(pr)
+}
+
+// cutGenerated is the file of one currency the cycle generates from txns;
+// ok is false when it would have no items.
+func cutGenerated(txns []Transaction, cfg CycleConfig, slot, ccy, fromDate, toDate string, at time.Time) (Cutting, bool) {
 	f := GenerateSettlementFile(txns, ccy, fromDate, toDate, BamboraOptions{
 		ValueDate: toDate,
 		ToAccount: cfg.SettlementAccount,
 	})
 	if f.Meta.NumberOfItems == 0 {
-		return CutFile{}, nil, false
+		return Cutting{}, false
 	}
 	mids := make([]string, 0, len(f.Batches))
 	for _, b := range f.Batches {
@@ -179,28 +211,32 @@ func cutGenerated(txns []Transaction, cfg CycleConfig, slot, ccy, fromDate, toDa
 			mids = append(mids, b.Transactions[0].AdditionalRef2)
 		}
 	}
-	return CutFile{
-		Filename:    BamboraFilename(cfg.Identifier, at, slot, ccy),
-		Slot:        slot,
-		MIDs:        mids,
-		Currency:    ccy,
-		AmountCents: f.Meta.SettlementAmount,
-		Items:       f.Meta.NumberOfItems,
-		FromDate:    fromDate,
-		ToDate:      toDate,
-	}, f.WriteCSV, true
+	return Cutting{
+		CutFile: CutFile{
+			Filename:    BamboraFilename(cfg.Identifier, at, slot, ccy),
+			Slot:        slot,
+			MIDs:        mids,
+			Currency:    ccy,
+			AmountCents: f.Meta.SettlementAmount,
+			Items:       f.Meta.NumberOfItems,
+			FromDate:    fromDate,
+			ToDate:      toDate,
+		},
+		Write: f.WriteCSV,
+	}, true
 }
 
 // cutFromFixtures serves the canned files in cfg.FixtureDir whose names
 // carry this slot's code, verbatim. Filenames are kept exactly as they sit
 // on disk -- a real example file's own name is part of what a consumer's
 // filename validator is being tested against, so rewriting it would defeat
-// the point of supplying one.
+// the point of supplying one. Each is read from disk as it is written, so
+// a real file of any size is served without being held.
 //
 // MID, currency and amount are left zero: the bytes are somebody else's
 // and this package does not re-parse them to guess. A consumer reading the
 // file learns those from the file, which is the honest arrangement.
-func cutFromFixtures(cfg CycleConfig, slot, fromDate, toDate string, _ time.Time) ([]CutFile, error) {
+func cutFromFixtures(cfg CycleConfig, slot, fromDate, toDate string, _ time.Time) ([]Cutting, error) {
 	if cfg.FixtureDir == "" {
 		return nil, fmt.Errorf("worldline: file source is %q but no fixture directory is configured", FileSourceFixture)
 	}
@@ -223,18 +259,23 @@ func cutFromFixtures(cfg CycleConfig, slot, fromDate, toDate string, _ time.Time
 	}
 	sort.Strings(names)
 
-	var out []CutFile
+	var out []Cutting
 	for _, name := range names {
-		b, err := os.ReadFile(filepath.Join(cfg.FixtureDir, name))
-		if err != nil {
+		path := filepath.Join(cfg.FixtureDir, name)
+		if _, err := os.Stat(path); err != nil {
 			return nil, fmt.Errorf("worldline: read fixture %s: %w", name, err)
 		}
-		out = append(out, CutFile{
-			Filename: name,
-			Slot:     slot,
-			FromDate: fromDate,
-			ToDate:   toDate,
-			Bytes:    b,
+		out = append(out, Cutting{
+			CutFile: CutFile{Filename: name, Slot: slot, FromDate: fromDate, ToDate: toDate},
+			Write: func(w io.Writer) error {
+				f, err := os.Open(path)
+				if err != nil {
+					return fmt.Errorf("worldline: read fixture %s: %w", name, err)
+				}
+				defer f.Close()
+				_, err = io.Copy(w, f)
+				return err
+			},
 		})
 	}
 	return out, nil

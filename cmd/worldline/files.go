@@ -39,15 +39,15 @@ import (
 	"github.com/webduvet/fintechlab-simple/internal/worldline"
 )
 
-// maxFileBytes bounds a file handed to publish: WORLDLINE_MAX_FILE_MB,
-// 512 by default, the same as the lab API takes an upload up to
-// (CONSOLE_UPLOAD_MAX_MB). A real day's file is well under a megabyte, but
+// maxFileBytes bounds a file handed to publish: WORLDLINE_MAX_FILE_MB, else
+// LAB_MAX_FILE_MB -- the one setting the lab API's upload bound reads too,
+// so a file the lab takes is one Worldline publishes -- else 512. A real day's file is well under a megabyte, but
 // testing a platform against a file of millions of transactions is one of
 // the things the lab is for, so the bound is room for that, not a target.
 // A file is streamed to disk and read row by row, never held whole, so the
 // bound is on disk, not memory.
 func maxFileBytes() int64 {
-	mb, err := strconv.ParseInt(os.Getenv("WORLDLINE_MAX_FILE_MB"), 10, 64)
+	mb, err := strconv.ParseInt(env("WORLDLINE_MAX_FILE_MB", env("LAB_MAX_FILE_MB", "512")), 10, 64)
 	if err != nil || mb <= 0 {
 		mb = 512
 	}
@@ -264,8 +264,18 @@ func (s *sim) publishSettlementFile(w http.ResponseWriter, r *http.Request) {
 		}
 		wire = b
 	}
+	// A file declared larger than the bound is refused before a byte of it
+	// is read. A caller that waits for 100 Continue (the lab API does) then
+	// never sends it, and reads this answer, not a connection closed under
+	// a body it is still sending.
+	limit := maxFileBytes()
+	if r.ContentLength > limit {
+		httputilx.Error(w, 413, tooLarge(limit))
+		return
+	}
 	// The file is staged on disk and read from there, twice: once row by
-	// row to check it, and once into each folder. It is never held whole.
+	// row to check it, and once into the SFTP root's staging folder. It is
+	// never held whole.
 	staged, err := os.CreateTemp("", "worldline-publish-*.csv")
 	if err != nil {
 		httputilx.Error(w, 500, "stage the file: "+err.Error())
@@ -273,11 +283,10 @@ func (s *sim) publishSettlementFile(w http.ResponseWriter, r *http.Request) {
 	}
 	defer os.Remove(staged.Name())
 	defer staged.Close()
-	limit := maxFileBytes()
 	if _, err := io.Copy(staged, http.MaxBytesReader(w, r.Body, limit)); err != nil {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			httputilx.Error(w, 413, fmt.Sprintf("a settlement file here is at most %d MiB (WORLDLINE_MAX_FILE_MB)", limit>>20))
+			httputilx.Error(w, 413, tooLarge(limit))
 			return
 		}
 		httputilx.Error(w, 400, "read body: "+err.Error())
@@ -303,6 +312,11 @@ func (s *sim) publishSettlementFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httputilx.WriteJSON(w, 201, out)
+}
+
+// tooLarge is publish's 413.
+func tooLarge(limit int64) string {
+	return fmt.Sprintf("a settlement file here is at most %d MiB (WORLDLINE_MAX_FILE_MB)", limit>>20)
 }
 
 // checkPublishName refuses a name that is not one file's in the folder it
@@ -334,9 +348,23 @@ func (s *sim) publishFile(e *envSim, started uint64, name string, src io.ReadSee
 	out := publishedFile{Name: name, Currency: ccy, Total: formatMinor(amount), MIDs: append([]string{}, sum.MIDs...)}
 	wire = wire && worldline.FilenameSlot(name) != worldline.SlotAfternoon && amount > 0
 
-	var err error
+	// The file goes to the SFTP root's staging folder first, which takes as
+	// long as its disk does; only its publish -- a rename into each folder
+	// -- waits for the guard. A reset never waits on a copy of hundreds of
+	// megabytes, nor does anything else of the environment's behind it.
+	staged, err := wlsftp.Stage(e.acq.root, name, func(w io.Writer) error {
+		if _, err := src.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		_, err := io.Copy(w, src)
+		return err
+	})
+	if err != nil {
+		return out, err
+	}
+	defer staged.Discard()
 	if !e.guard.apply(started, func() {
-		out.Published, err = wlsftp.PublishFrom(e.acq.root, name, src)
+		out.Published, err = staged.Commit()
 		if err != nil {
 			return
 		}

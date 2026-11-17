@@ -48,6 +48,16 @@ type fakeWorldline struct {
 	// transactions; slow holds each answer back that long.
 	bigTxns int
 	slow    time.Duration
+	// limit, when set, refuses a publish declared larger than it before
+	// reading any of it, as Worldline does; expects is the Expect header
+	// each publish came with.
+	limit   int64
+	expects []string
+	// garbled answers a publish with a 201 whose JSON is cut off.
+	garbled bool
+	// midway, when set, makes render send half the file, close midway and
+	// wait for release before it sends the rest.
+	midway, release chan struct{}
 }
 
 // settings is what the test set, read under the lock.
@@ -95,7 +105,19 @@ func newFilesApp(t *testing.T) (*app, *fakeWorldline) {
 		w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 		w.Header().Set("Lab-File-Name", tenant.FromRequest(r)+"_ER_"+b.Currency+".csv")
 		if big == 0 {
-			_, _ = w.Write(bambora(t, b.Currency, "MID-"+tenant.FromRequest(r)))
+			content := bambora(t, b.Currency, "MID-"+tenant.FromRequest(r))
+			wl.mu.Lock()
+			midway, release := wl.midway, wl.release
+			wl.mu.Unlock()
+			if midway != nil {
+				half := len(content) / 2
+				_, _ = w.Write(content[:half])
+				w.(http.Flusher).Flush()
+				close(midway)
+				<-release
+				content = content[half:]
+			}
+			_, _ = w.Write(content)
 			return
 		}
 		txns := make([]worldline.Transaction, big)
@@ -107,6 +129,14 @@ func newFilesApp(t *testing.T) (*app, *fakeWorldline) {
 		_ = bw.Flush()
 	})
 	mux.HandleFunc("POST /sim/settlement-files/publish", func(w http.ResponseWriter, r *http.Request) {
+		wl.mu.Lock()
+		wl.expects = append(wl.expects, r.Header.Get("Expect"))
+		limit, garbled := wl.limit, wl.garbled
+		wl.mu.Unlock()
+		if limit > 0 && r.ContentLength > limit {
+			httputilx.Error(w, 413, "a settlement file here is at most 1 MiB (WORLDLINE_MAX_FILE_MB)")
+			return
+		}
 		// Read as it comes, as Worldline reads it, counting the bytes.
 		n := &countingReader{r: r.Body}
 		if _, err := worldline.SummarizeSettlementFile(n); err != nil {
@@ -119,6 +149,11 @@ func newFilesApp(t *testing.T) (*app, *fakeWorldline) {
 		wl.published = append(wl.published, tenant.FromRequest(r)+"/"+r.URL.Query().Get("name")+"?"+r.URL.Query().Get("wire"))
 		wl.sizes = append(wl.sizes, n.n)
 		wl.mu.Unlock()
+		if garbled {
+			w.WriteHeader(201)
+			_, _ = io.WriteString(w, `{"published": "/download/x.csv", "mids": ["MID-1", "MID`)
+			return
+		}
 		httputilx.WriteJSON(w, 201, map[string]any{"published": "/download/" + r.URL.Query().Get("name") + ".pgp"})
 	})
 	srv := httptest.NewServer(mux)
@@ -402,5 +437,126 @@ func TestAFileOverTheOld64MiBIsCutAndPublishedThroughTheLabAPI(t *testing.T) {
 	defer wl.mu.Unlock()
 	if len(wl.sizes) != 1 || wl.sizes[0] != cut.File.Bytes {
 		t.Errorf("Worldline was sent %v bytes, want %d", wl.sizes, cut.File.Bytes)
+	}
+}
+
+// A publish Worldline answered 2xx is published, whatever comes after the
+// status: an answer cut off -- it lists every MID, and a file can name
+// more than any bound -- is a warning, not a failure that a retry would
+// publish, and wire, a second time.
+func TestAPublishWhoseAnswerCannotBeReadIsStillPublished(t *testing.T) {
+	a, wl := newFilesApp(t)
+	if w := as(t, a, "admin-token", "POST", "/v1/settlement-files?name=eur.csv", string(bambora(t, "EUR", "MID-1"))); w.Code != 201 {
+		t.Fatalf("upload: %d %s", w.Code, w.Body)
+	}
+	wl.mu.Lock()
+	wl.garbled = true
+	wl.mu.Unlock()
+	w := as(t, a, "admin-token", "POST", "/v1/settlement-files/publish", `{"files": ["eur.csv"]}`)
+	var out struct {
+		Published int              `json:"published"`
+		Results   []map[string]any `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || out.Published != 1 || len(out.Results) != 1 || out.Results[0]["error"] != nil {
+		t.Fatalf("publish answered cut off: %d %s, want it counted as published", w.Code, w.Body)
+	}
+	if warn, _ := out.Results[0]["warning"].(string); !strings.Contains(warn, "published, but") {
+		t.Errorf("the result says %v, want a warning that the answer could not be read", out.Results[0])
+	}
+}
+
+// A file over Worldline's limit is refused before any of it is sent: the
+// lab API asks first (Expect: 100-continue) and passes on Worldline's 413,
+// in its words, not a connection reset under a body it was still sending.
+func TestAPublishOverWorldlinesLimitIsRefusedBeforeItIsSent(t *testing.T) {
+	a, wl := newFilesApp(t)
+	txns := make([]worldline.Transaction, 8000)
+	for i := range txns {
+		txns[i] = worldline.Transaction{ID: strconv.Itoa(i), MID: fmt.Sprintf("MID-%03d", i%50), Currency: "EUR", AmountCents: 1000, Date: "2026-11-09"}
+	}
+	var big bytes.Buffer
+	if err := worldline.GenerateSettlementFile(txns, "EUR", "2026-11-09", "2026-11-09", worldline.BamboraOptions{}).WriteCSV(&big); err != nil {
+		t.Fatal(err)
+	}
+	if big.Len() <= 1<<20 {
+		t.Fatalf("the file is %d bytes, want over 1 MiB", big.Len())
+	}
+	if w := as(t, a, "admin-token", "POST", "/v1/settlement-files?name=big.csv", big.String()); w.Code != 201 {
+		t.Fatalf("upload: %d %s", w.Code, w.Body)
+	}
+	wl.mu.Lock()
+	wl.limit = 1 << 20
+	wl.mu.Unlock()
+
+	w := as(t, a, "admin-token", "POST", "/v1/settlement-files/publish", `{"files": ["big.csv"]}`)
+	if w.Code != 502 || !strings.Contains(w.Body.String(), "HTTP 413") || !strings.Contains(w.Body.String(), "WORLDLINE_MAX_FILE_MB") {
+		t.Errorf("publish over Worldline's limit: %d %s, want its 413 naming WORLDLINE_MAX_FILE_MB", w.Code, w.Body)
+	}
+	wl.mu.Lock()
+	defer wl.mu.Unlock()
+	if len(wl.expects) != 1 || wl.expects[0] != "100-continue" {
+		t.Errorf("the publish came with Expect %q, want 100-continue", wl.expects)
+	}
+	if len(wl.sizes) != 0 {
+		t.Errorf("Worldline read %v bytes of a file it refused", wl.sizes)
+	}
+}
+
+// A cut on its way to disk is in no folder a listing reads, under any
+// name, and what a lab API stopped mid-write left behind goes at start-up.
+func TestACutInProgressIsNeverListed(t *testing.T) {
+	a, wl := newFilesApp(t)
+	wl.mu.Lock()
+	wl.midway, wl.release = make(chan struct{}), make(chan struct{})
+	midway, release := wl.midway, wl.release
+	wl.mu.Unlock()
+
+	cut := make(chan int, 1)
+	go func() { cut <- as(t, a, "admin-token", "POST", "/v1/settlement-files/cut", `{"currency": "EUR"}`).Code }()
+	<-midway
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if entries, _ := os.ReadDir(a.tmpDir()); len(entries) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("the cut never started writing")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	listed := as(t, a, "admin-token", "GET", "/v1/settlement-files", "")
+	close(release)
+	if strings.Contains(listed.Body.String(), `"name"`) {
+		t.Errorf("a cut half-way to disk is listed: %s", listed.Body)
+	}
+	if code := <-cut; code != 201 {
+		t.Fatalf("cut: %d", code)
+	}
+	if listed := as(t, a, "admin-token", "GET", "/v1/settlement-files", ""); strings.Count(listed.Body.String(), `"name"`) != 1 {
+		t.Errorf("after the cut: %s, want the one file", listed.Body)
+	}
+
+	// A stopped lab API's leftovers: one in the temporary folder, one an
+	// older lab left beside the files. Neither is listed; the first goes.
+	left := filepath.Join(a.tmpDir(), ".tmp-left")
+	older := filepath.Join(a.filesDir(context.Background(), sourceUploaded), ".upload-123")
+	for _, p := range []string{left, older} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("half"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if listed := as(t, a, "admin-token", "GET", "/v1/settlement-files", ""); strings.Count(listed.Body.String(), `"name"`) != 1 {
+		t.Errorf("leftovers are listed: %s", listed.Body)
+	}
+	a.sweepTmp()
+	if _, err := os.Stat(left); !os.IsNotExist(err) {
+		t.Errorf("the sweep left %s: %v", left, err)
 	}
 }

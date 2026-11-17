@@ -306,8 +306,16 @@ POD_TOKEN_CONFIGMAP = if [ -n "$$LAB_API_TOKEN" ]; then \
 	printf "  lab-api-token: '%s'\n" "$$(printf '%s' "$$LAB_API_TOKEN" | sed "s/'/''/g")"; \
 	fi
 
+# LAB_MAX_FILE_MB=… raises the largest settlement file the lab takes and
+# Worldline publishes (512 MB unset), as under compose: pod-up appends the
+# ConfigMap deploy/pod/lab-max-file-mb.yaml defines, holding it.
+POD_MAX_FILE_CONFIGMAP = if [ -n "$$LAB_MAX_FILE_MB" ]; then \
+	printf '%s\n' '---' 'apiVersion: v1' 'kind: ConfigMap' 'metadata:' '  name: fintechlab-lab-max-file-mb' 'data:'; \
+	printf "  lab-max-file-mb: '%s'\n" "$$(printf '%s' "$$LAB_MAX_FILE_MB" | tr -cd '0-9')"; \
+	fi
+
 pod-up:
-	@{ $(POD_RENDER); $(POD_TOKEN_CONFIGMAP); } | (cd deploy/pod && podman kube play --replace --build=false $(POD_PLAY_OPTS) -)
+	@{ $(POD_RENDER); $(POD_TOKEN_CONFIGMAP); $(POD_MAX_FILE_CONFIGMAP); } | (cd deploy/pod && podman kube play --replace --build=false $(POD_PLAY_OPTS) -)
 	@echo ""
 	@echo "lab is up as pod 'fintechlab'. control panel: http://127.0.0.1:8090"
 	@echo "lab API: http://127.0.0.1:8097/v1$(if $(LAB_API_TOKEN), (asks for LAB_API_TOKEN))"
@@ -322,12 +330,14 @@ pod-down:
 #   podman load -i fintechlab-$(LAB_VERSION)-images.tar
 #   podman kube play --replace fintechlab-$(LAB_VERSION).yaml
 #   (add --configmap regenerate-keys.yaml to issue new keys, and
-#    --configmap lab-api-token.yaml, with a token in it, to ask for one)
+#    --configmap lab-api-token.yaml, with a token in it, to ask for one,
+#    and --configmap lab-max-file-mb.yaml, with a number in it, to raise
+#    the largest settlement file)
 pod-bundle: pod-images
 	@mkdir -p dist
 	podman save -m -o dist/fintechlab-$(LAB_VERSION)-images.tar $(foreach s,$(POD_SERVICES),$(IMAGE_PREFIX)/$(s):$(LAB_VERSION))
 	@$(POD_RENDER) > dist/fintechlab-$(LAB_VERSION).yaml
-	@cp deploy/pod/regenerate-keys.yaml deploy/pod/lab-api-token.yaml dist/
+	@cp deploy/pod/regenerate-keys.yaml deploy/pod/lab-api-token.yaml deploy/pod/lab-max-file-mb.yaml dist/
 	@echo "dist/fintechlab-$(LAB_VERSION)-images.tar + dist/fintechlab-$(LAB_VERSION).yaml -- see docs/deploy-pod.md"
 
 # --- the lab deployed somewhere ------------------------------------------

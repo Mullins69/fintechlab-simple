@@ -104,7 +104,7 @@ func (s *settlementApp) run(slot string, at time.Time, fromDate, toDate string) 
 	started := s.guard.start()
 	run := CycleRun{Env: owner(s.env), At: at.UTC(), Slot: slot, FromDate: fromDate, ToDate: toDate}
 
-	files, err := worldline.Cut(s.store, s.config(), slot, fromDate, toDate, at)
+	cuts, err := worldline.CutStreams(s.store, s.config(), slot, fromDate, toDate, at)
 	if err != nil {
 		run.Errors = append(run.Errors, err.Error())
 		if !s.guard.apply(started, func() { s.record(run) }) {
@@ -112,13 +112,27 @@ func (s *settlementApp) run(slot string, at time.Time, fromDate, toDate string) 
 		}
 		return run
 	}
-	run.Files = files
+	// The run keeps what each file settles, not its bytes: each is written
+	// straight to the SFTP root's staging folder as it is rendered, and
+	// only its publish -- a rename -- waits for the guard, so a file of
+	// millions of transactions is neither held whole nor holds a reset off
+	// while it goes to disk.
+	run.Files = make([]worldline.CutFile, 0, len(cuts))
+	for _, c := range cuts {
+		run.Files = append(run.Files, c.CutFile)
+	}
 
 	totals := map[string]int64{}
-	for _, f := range files {
+	for _, c := range cuts {
+		staged, err := wlsftp.Stage(s.root, c.Filename, c.Write)
+		if err != nil {
+			run.Errors = append(run.Errors, err.Error())
+			continue
+		}
 		var name string
-		var err error
-		if !s.guard.apply(started, func() { name, err = wlsftp.Publish(s.root, f.Filename, f.Bytes) }) {
+		ok := s.guard.apply(started, func() { name, err = staged.Commit() })
+		staged.Discard()
+		if !ok {
 			return dropped(run)
 		}
 		if err != nil {
@@ -126,14 +140,7 @@ func (s *settlementApp) run(slot string, at time.Time, fromDate, toDate string) 
 			continue
 		}
 		run.Published = append(run.Published, name)
-		totals[f.Currency] += f.AmountCents
-	}
-	// The files are published: the run keeps what they settled, not their
-	// bytes. The history holds 100 runs, and 100 runs of a file of millions
-	// of transactions is gigabytes held for a JSON answer that never shows
-	// a byte of them (CutFile.Bytes is not serialised).
-	for i := range run.Files {
-		run.Files[i].Bytes = nil
+		totals[c.Currency] += c.AmountCents
 	}
 
 	if slot == worldline.SlotMorning {
@@ -153,7 +160,7 @@ func (s *settlementApp) run(slot string, at time.Time, fromDate, toDate string) 
 		return dropped(run)
 	}
 	log.Printf("worldline: settlement cycle env=%s slot=%s coverage=%s..%s files=%d published=%d lump_sums=%d errors=%d",
-		tenant.Normalize(s.env), slot, fromDate, toDate, len(files), len(run.Published), len(run.LumpSums), len(run.Errors))
+		tenant.Normalize(s.env), slot, fromDate, toDate, len(cuts), len(run.Published), len(run.LumpSums), len(run.Errors))
 	return run
 }
 

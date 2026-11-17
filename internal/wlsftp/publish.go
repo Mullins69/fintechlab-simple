@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/webduvet/fintechlab-simple/internal/atomicfile"
 )
 
 // Publish writes one settlement file into the SFTP server's own
@@ -29,60 +31,98 @@ func Publish(root, filename string, body []byte) (string, error) {
 	return PublishFrom(root, filename, bytes.NewReader(body))
 }
 
-// PublishFrom is Publish for a file read from src, which it reads from the
-// start once per folder: a file of hundreds of megabytes goes from disk to
-// disk and is never held whole.
-//
-// Each copy is written under a hidden name beside its final one and
-// renamed into place when it is whole, so a platform polling mid-publish
-// sees the file complete or not at all -- never the first half of it,
-// which is what a large file written in place would offer.
-func PublishFrom(root, filename string, src io.ReadSeeker) (string, error) {
+// PublishFrom is Publish for a file read from src: Stage, then Commit.
+func PublishFrom(root, filename string, src io.Reader) (string, error) {
+	s, err := Stage(root, filename, func(w io.Writer) error {
+		_, err := io.Copy(w, src)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	defer s.Discard()
+	return s.Commit()
+}
+
+// DirStaging is where a file is written before it is renamed into the
+// folders a platform lists: a hidden folder of the root's own, beside
+// download/ and to_WLNORDIC/ and never inside either, so a poll of those
+// folders mid-publish meets the file whole or not at all -- never half of
+// it under a hidden name, which a poller that takes every name it lists
+// would take for a settlement file. It is inside the root, not beside it,
+// because a rename is only whole within one filesystem.
+const DirStaging = ".staging"
+
+// Staged is a settlement file written whole into the root's staging
+// folder, one copy for each folder it is published in, and not yet in
+// any of them.
+type Staged struct {
+	root, filename string
+	copies         map[string]*atomicfile.File // by folder
+}
+
+// Stage writes the file write renders into root's staging folder, once
+// for download/ and once for to_WLNORDIC/, without publishing it: a file
+// of hundreds of megabytes takes as long as its disk does, and none of it
+// is visible until Commit. write is called once; the second copy is made
+// from the first.
+func Stage(root, filename string, write func(io.Writer) error) (*Staged, error) {
+	s := &Staged{root: root, filename: filename, copies: map[string]*atomicfile.File{}}
+	tmp := filepath.Join(root, DirStaging)
+	first, err := atomicfile.Create(tmp)
+	if err != nil {
+		return nil, fmt.Errorf("wlsftp: stage %s: %w", filename, err)
+	}
+	s.copies[DirDownload] = first
+	if err := write(first); err != nil {
+		s.Discard()
+		return nil, fmt.Errorf("wlsftp: stage %s: %w", filename, err)
+	}
+	second, err := atomicfile.Create(tmp)
+	if err != nil {
+		s.Discard()
+		return nil, fmt.Errorf("wlsftp: stage %s: %w", filename, err)
+	}
+	s.copies[DirToWLNordic] = second
+	if _, err := first.Seek(0, io.SeekStart); err == nil {
+		_, err = io.Copy(second, first)
+	}
+	if err != nil {
+		s.Discard()
+		return nil, fmt.Errorf("wlsftp: stage %s: %w", filename, err)
+	}
+	return s, nil
+}
+
+// Commit publishes what Stage wrote: each copy is renamed into its folder,
+// which takes a moment whatever the file's size. It returns the name the
+// file has there.
+func (s *Staged) Commit() (string, error) {
 	for _, d := range []string{DirDownload, DirToWLNordic} {
-		dir := filepath.Join(root, filepath.FromSlash(d))
+		dir := filepath.Join(s.root, filepath.FromSlash(d))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return "", fmt.Errorf("wlsftp: create %s: %w", dir, err)
 		}
-		if _, err := src.Seek(0, io.SeekStart); err != nil {
-			return "", fmt.Errorf("wlsftp: rewind %s: %w", filename, err)
-		}
-		if err := writeWhole(dir, filename, src); err != nil {
-			return "", err
+		if err := s.copies[d].Commit(filepath.Join(dir, s.filename)); err != nil {
+			return "", fmt.Errorf("wlsftp: publish %s: %w", s.filename, err)
 		}
 	}
-	return filename, nil
+	return s.filename, nil
 }
 
-// writeWhole writes src to dir/filename by way of a hidden partial file in
-// dir, renamed over filename once it is complete.
-func writeWhole(dir, filename string, src io.Reader) error {
-	final := filepath.Join(dir, filename)
-	tmp, err := os.CreateTemp(dir, "."+filename+".*.partial")
-	if err != nil {
-		return fmt.Errorf("wlsftp: write %s: %w", final, err)
+// Discard removes whatever copy Commit did not publish. It is safe to
+// defer and to call more than once.
+func (s *Staged) Discard() {
+	for _, f := range s.copies {
+		f.Discard()
 	}
-	ok := false
-	defer func() {
-		if !ok {
-			tmp.Close()
-			os.Remove(tmp.Name())
-		}
-	}()
-	if _, err := io.Copy(tmp, src); err != nil {
-		return fmt.Errorf("wlsftp: write %s: %w", final, err)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		return fmt.Errorf("wlsftp: write %s: %w", final, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("wlsftp: write %s: %w", final, err)
-	}
-	if err := os.Rename(tmp.Name(), final); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("wlsftp: write %s: %w", final, err)
-	}
-	ok = true
-	return nil
+}
+
+// SweepStaging removes what a publish left in root's staging folder when
+// the process stopped mid-way. Call it where nothing can be publishing, at
+// start-up.
+func SweepStaging(root string) (int, error) {
+	return atomicfile.Sweep(filepath.Join(root, DirStaging))
 }
 
 // RemoveFiles deletes the regular files directly in root/dir whose name
