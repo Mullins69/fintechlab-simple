@@ -170,10 +170,12 @@ run delivered.
 
 - **notifier**: `POST /webhooks`, once per delivery attempt.
 - **banking-circle**: `POST /raw-events`, for its seeded subscription
-  (`WEBHOOK_URL`) and for any subscription a client registers with an
-  endpoint here.
+  (`WEBHOOK_URL`) while it is active — it is seeded inactive, as every
+  stand-in's wiring starts off (`BC_SEED_SUBSCRIPTION_ACTIVE`) — and for
+  any subscription a client registers with an endpoint here.
 - **aci**: `POST /raw-events` (`ACI_WEBHOOK_TARGET_URL`), while aci's own
-  lab switch is on.
+  lab switch is on; it starts off (`ACI_WEBHOOK_CONNECTED`). The e2e
+  suite's `aci-payment-notification` switches it on for its run and back.
 - **e2e suite**: `payment-api-to-webhook` polls `GET /events` for a
   `payment.accepted` with its payment id; `banking-circle-subscription`
   and `banking-circle-retry-deactivation` register Banking Circle

@@ -271,6 +271,35 @@ paths:
                 $ref: '#/components/schemas/Error'
       externalDocs:
         url: docs/api/lab-api.md#get-v1banking-circlesubscriptions
+  /v1/banking-circle/subscriptions/{id}:
+    delete:
+      operationId: deleteBankingCircleSubscriptionsById
+      summary: 'Delete a subscription: Banking Circle stops calling its endpoint'
+      description: 'Reaches: banking-circle DELETE /sim/subscription/{id}.'
+      tags:
+        - banks
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: a Banking Circle subscription id
+          schema:
+            type: string
+      responses:
+        "200":
+          description: done
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          description: 'an error: 400 the caller can fix, 404 unknown, 409 refused by state, 501 not here by design, 502 a peer failed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      externalDocs:
+        url: docs/api/lab-api.md#delete-v1banking-circlesubscriptionsid
   /v1/banking-circle/subscriptions/{id}/pause:
     post:
       operationId: postBankingCircleSubscriptionsByIdPause
@@ -358,6 +387,28 @@ paths:
                 $ref: '#/components/schemas/Error'
       externalDocs:
         url: docs/api/lab-api.md#post-v1banking-circlesubscriptionsidtest
+  /v1/banking-circle/subscriptions/reset:
+    post:
+      operationId: postBankingCircleSubscriptionsReset
+      summary: Put the environment's subscriptions back as Banking Circle started, and nothing else
+      description: 'Reaches: banking-circle POST /sim/subscriptions/reset.'
+      tags:
+        - banks
+      responses:
+        "200":
+          description: done
+          content:
+            application/json:
+              schema:
+                type: object
+        default:
+          description: 'an error: 400 the caller can fix, 404 unknown, 409 refused by state, 501 not here by design, 502 a peer failed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+      externalDocs:
+        url: docs/api/lab-api.md#post-v1banking-circlesubscriptionsreset
   /v1/banks:
     get:
       operationId: getBanks

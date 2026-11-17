@@ -298,9 +298,12 @@ The lab's **stand-ins** played the platform's part before one plugged in:
 daily cutoff; `receiver` is where Banking Circle's seeded subscription and
 ACI deliver. `payment-api` and `notifier` are stand-ins nothing calls on its
 own — only `make demo-payment` and the e2e suite do. Their cards start
-hidden in the console (Configuration → *Stand-ins* has the switches); their
-wiring starts connected, so the lab runs end to end with no platform at
-all. A platform that replaces them says so:
+hidden in the console (Configuration → *Stand-ins* has the switches), and
+their wiring starts disconnected: they are for developing the lab with no
+platform plugged in, and beside a platform they would pay its outlets and
+take its webhooks a second time. A platform has nothing to ask for to keep
+them off; one that wants them gone for good, whatever a person connected
+since, says so:
 
 ```json
 "stand_ins": {

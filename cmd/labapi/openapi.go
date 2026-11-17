@@ -234,6 +234,8 @@ var opSpecs = map[string]opSpec{
 	"POST /v1/banking-circle/subscriptions/{id}/test":   {Bodyless: true},
 	"POST /v1/banking-circle/subscriptions/{id}/pause":  {Bodyless: true},
 	"POST /v1/banking-circle/subscriptions/{id}/resume": {Bodyless: true},
+	"DELETE /v1/banking-circle/subscriptions/{id}":      {Bodyless: true},
+	"POST /v1/banking-circle/subscriptions/reset":       {Bodyless: true},
 	"POST /v1/banking-circle/payouts/{id}/return":       {Bodyless: true},
 	"POST /v1/banking-circle/payouts/{id}/reverse":      {Bodyless: true},
 	"POST /v1/actions/fund-sga":                         {Bodyless: true, Query: []param{{Name: "amount", About: "a decimal per empty safeguarding account; default 1000000.00"}}},

@@ -162,7 +162,7 @@ health probe. What the Vendors, Platform and Verification views draw.
   lapsed one not answering, is reported `unknown` with `detail`
   `registration stopped` / `registration lapsed`.
 - A stand-in also carries `stand_in`: `shown`, `set_by`, `set_at`,
-  `plays`, `starts_off`.
+  `plays`, `starts_on`.
 - `control_url` is the service's control port (`base_url`'s port plus
   1000, plain HTTP): every `/sim/*` route and its own `GET /health`. It is
   where the lab API reaches the service, with no vendor login. A plugin has
@@ -345,10 +345,10 @@ from the services that own it.
 {"stand_ins": [
    {"id": "settlement", "name": "Settlement (platform stand-in)", "shown": false,
     "set_by": "lab-api", "set_at": "…", "plays": "…",
-    "starts_off": "SETTLEMENT_CONNECTED=false on the settlement service",
-    "state": "connected",
+    "starts_on": "SETTLEMENT_CONNECTED=true on the settlement service",
+    "state": "disconnected",
     "connections": [{"id": "timer", "label": "Worldline pull and cutoff payouts",
-                     "connected": true, "detail": "…"}]},
+                     "connected": false, "detail": "…"}]},
    {"id": "receiver", …,
     "connections": [{"id": "banking-circle", "label": "Banking Circle notifications", …},
                     {"id": "aci", "label": "ACI webhooks", …}]},
@@ -1564,6 +1564,65 @@ the batches it would have gone out in.
 `502` as for pause.
 
 **Reaches** — `banking-circle POST /sim/subscription/{id}/resume`.
+
+### `DELETE /v1/banking-circle/subscriptions/{id}`
+
+Delete one subscription: Banking Circle stops calling its endpoint. It is
+the subscriber's own `DELETE` without the `If-Match` the vendor wants, so
+the lab can remove a subscription whatever its `rowVersion`.
+
+**Path parameters** — `id`: a subscription id, the environment's.
+
+**Answers** — `200`, Banking Circle's body:
+`{"subscriptionId": "sub_…", "endpoint": "…", "deleted": true, "dropped": 3}`.
+`dropped` counts the notifications that will now never be sent: in a batch
+filling up, parked behind a pause, retained after the bank gave up on the
+endpoint, or on their way out. They go with it, and so does a pause. A
+batch on its way out stops at its next attempt, in its retry schedule or
+waiting its turn in a release. Only a send already on the wire finishes:
+it is not in `dropped`, because the endpoint may still acknowledge it, and
+it is not retried if it fails. A refusal is Banking Circle's own, status
+and words: `404` for an id the environment does not have, another
+environment's included; `500` when the subscription is deleted but Banking
+Circle could not write its state file, so a restart would bring it back.
+`502` only when Banking Circle is unreachable.
+
+- A platform that subscribes on boot subscribes again when it next
+  starts. The deletion is in the subscription's *Notifications sent* log
+  (`subscription.delete`), and it is written to Banking Circle's state file
+  before the answer, so a restart does not bring it back.
+
+**Reaches** — `banking-circle DELETE /sim/subscription/{id}`.
+
+### `POST /v1/banking-circle/subscriptions/reset`
+
+Put the environment's subscriptions back as Banking Circle started: the
+default environment keeps only the subscription it seeds at start-up, put
+back as it was seeded; another environment keeps none. The seeded one comes
+back not paused, with nothing parked behind a pause and nothing retained
+after a deactivation; what it was already sending still goes. Nothing else
+of the bank's changes: payments, balances, accounts and tokens all stay.
+
+Subscriptions outlive a restart (Banking Circle's state file), so the ones
+a run made are still there for the next run. This clears them without the
+reset of scope `all` (`POST /v1/services/banking-circle/reset`), which also
+empties the ledger. An environment's token resets its own; the admin names
+one, or every one with `*`.
+
+**Answers** — `200`
+
+```json
+{"env": "default", "cleared": {"subscriptions": 2, "notifications": 4, "pauses": 1}}
+```
+
+`subscriptions` counts each one deleted and each seeded one put back
+because it had been deleted or changed since. `notifications` and `pauses`
+are what went with the deleted ones and what the seeded one held. A
+refusal is Banking Circle's own, status and words: `500` when it reset the
+subscriptions but could not write its state file. `502` only when Banking
+Circle is unreachable.
+
+**Reaches** — `banking-circle POST /sim/subscriptions/reset`.
 
 ### `GET /v1/banking-circle/payouts`
 

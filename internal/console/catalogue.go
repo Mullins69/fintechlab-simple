@@ -379,9 +379,9 @@ func DefaultCatalogue() *Catalogue {
 		{
 			ID: "settlement", Name: "Settlement (platform stand-in)", Kind: KindPlatform,
 			StandIn: &StandInInfo{
-				Shown:     shown,
-				Plays:     "your settle pipeline: pulls Worldline's file on a timer and pays each outlet through B4B at the daily cutoff. Wanted only when no platform is plugged in — otherwise its payouts at B4B are payouts nobody made.",
-				StartsOff: "SETTLEMENT_CONNECTED=false on the settlement service",
+				Shown:    shown,
+				Plays:    "your settle pipeline: pulls Worldline's file on a timer and pays each outlet through B4B at the daily cutoff. Off unless you connect it: wanted only for developing the lab with no platform plugged in — otherwise it pays every outlet a second time.",
+				StartsOn: "SETTLEMENT_CONNECTED=true on the settlement service",
 			},
 			Summary:    "Scaffolding for your platform: pulls Worldline's file over real SFTP+PGP, decrypts, parses, splits it per MID and pays each outlet through B4B.",
 			BaseURL:    "http://127.0.0.1:8083",
@@ -408,9 +408,9 @@ func DefaultCatalogue() *Catalogue {
 		{
 			ID: "receiver", Name: "Webhook receiver (platform stand-in)", Kind: KindPlatform,
 			StandIn: &StandInInfo{
-				Shown:     shown,
-				Plays:     "your webhook listener: Banking Circle's seeded subscription and ACI deliver here. Wanted only when nothing of yours subscribes — otherwise it is a second listener taking the same batches.",
-				StartsOff: "ACI_WEBHOOK_CONNECTED=false on aci; the Banking Circle subscription is switched live through the bank's own API",
+				Shown:    shown,
+				Plays:    "your webhook listener: Banking Circle's seeded subscription and ACI deliver here. Off unless you connect it: wanted only for developing the lab with no platform plugged in — otherwise it is a second listener taking the same batches.",
+				StartsOn: "ACI_WEBHOOK_CONNECTED=true on aci, and BC_SEED_SUBSCRIPTION_ACTIVE=true on banking-circle (read when it seeds, on its first start)",
 			},
 			Summary:    "Stand-in for your own listener: verifies the HMAC scheme, and captures raw bodies for wire formats it holds no key for.",
 			BaseURL:    "https://127.0.0.1:8443",

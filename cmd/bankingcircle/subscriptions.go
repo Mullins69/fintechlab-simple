@@ -243,15 +243,65 @@ func answerDeactivated(w http.ResponseWriter, sub *bankingcircle.Subscription, e
 }
 
 func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
-	if a.foreignSubscription(r, r.PathValue("id")) {
-		writeSubscriptionError(w, bankingcircle.ErrSubscriptionNotFound)
+	match := ifMatch(r)
+	if _, _, ok := a.removeSubscription(w, r, r.PathValue("id"), &match, "deleted by its subscriber"); ok {
+		w.WriteHeader(200)
+	}
+}
+
+// simDeleteSubscription is DELETE /sim/subscription/{subscriptionId}: the
+// vendor's DELETE without If-Match, the lab overriding the concurrency
+// check as it does for activate and deactivate.
+func (a *app) simDeleteSubscription(w http.ResponseWriter, r *http.Request) {
+	sub, dropped, ok := a.removeSubscription(w, r, r.PathValue("subscriptionId"), nil, "deleted by the lab")
+	if !ok {
 		return
 	}
-	if err := a.subs.Delete(r.PathValue("id"), ifMatch(r)); err != nil {
+	httputilx.WriteJSON(w, 200, map[string]any{
+		"subscriptionId": sub.ID,
+		"endpoint":       sub.Endpoint,
+		"deleted":        true,
+		"dropped":        dropped,
+	})
+}
+
+// removeSubscription is both DELETEs, the vendor's (ifMatch, its
+// rowVersion) and the lab's (nil): subscription id, r's environment's, goes
+// with what the dispatcher held for it, the deletion is logged, and the
+// state file is written before the caller answers -- a deletion the bank
+// has answered must not come back with a restart. ok is false when it has
+// answered already: the subscription's error, or a 500 when the state file
+// was not written.
+func (a *app) removeSubscription(w http.ResponseWriter, r *http.Request, id string, ifMatch *string, by string) (sub *bankingcircle.Subscription, dropped int, ok bool) {
+	sub, dropped, err := a.bank.RemoveSubscription(scopeOf(r), id, ifMatch)
+	if err != nil {
 		writeSubscriptionError(w, err)
+		return nil, 0, false
+	}
+	a.recordRemoved(sub, dropped, by)
+	log.Printf("banking-circle: subscription %s (%s) %s; %d notification(s) dropped", sub.ID, sub.Endpoint, by, dropped)
+	if err := a.persistNow(); err != nil {
+		httputilx.Error(w, 500, "deleted in memory, but "+err.Error())
+		return nil, 0, false
+	}
+	return sub, dropped, true
+}
+
+// simResetSubscriptions is POST /sim/subscriptions/reset: the environment's
+// subscriptions back as start-up left them -- the default's seeded one, a
+// customer's none -- and nothing else of the bank's. It is how a lab starts
+// a run with no subscriptions a previous run made, now that they outlive a
+// restart, without the reset of scope all that also empties the ledger.
+// "*" resets every environment's.
+func (a *app) simResetSubscriptions(w http.ResponseWriter, r *http.Request) {
+	scope := scopeOf(r)
+	cleared := a.bank.ResetSubscriptions(scope)
+	log.Printf("banking-circle: subscriptions of %s reset by the lab: %v", scope, cleared)
+	if err := a.persistNow(); err != nil {
+		httputilx.Error(w, 500, "reset in memory, but "+err.Error())
 		return
 	}
-	w.WriteHeader(200)
+	httputilx.WriteJSON(w, 200, map[string]any{"env": scope, "cleared": cleared})
 }
 
 type createSubscriptionEventReq struct {

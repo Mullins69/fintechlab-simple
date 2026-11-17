@@ -29,7 +29,7 @@ stopped.
 | Auth | `:8085`: TLS 1.2+ with a server certificate from the lab CA. A client certificate per `BC_MTLS` (`require`, the default and compose's; `optional`; `off`), verified against `CA_FILE`; without one under `require` the handshake fails and there is no HTTP answer. Then `GET /api/v1/authorizations/authorize` with a customer's login, or any other non-empty Basic credentials (the default environment's), returns a bearer token for that customer, and every other route on `:8085` except `GET /health` needs `Authorization: Bearer <token>` (`401` `{"error": "bearer token required", "status": 401}` otherwise). `:8095`: none. The control port: no vendor auth, no TLS. It takes calls from anything that can reach it, or only from `SIM_CONTROL_ALLOW` (addresses or CIDRs) when that is set |
 | A platform points here with | the lab API's connect kit (`GET :8097/v1/connect/env/banking-circle`): `BC_AUTH_BASE_URL` and `BC_API_BASE_URL` (both `https://…:8085`), `BC_API_M2M_USERNAME`, `BC_API_M2M_PASSWORD`, `BC_API_MTLS_ENABLED`, `BC_API_CLIENT_CERT_PEM_BASE64`, `BC_API_CLIENT_KEY_PEM_BASE64`, `BC_SAFEGUARDING_ACCOUNT_ID_EUR`, `BC_SAFEGUARDING_ACCOUNT_ID_GBP`, `NODE_EXTRA_CA_CERTS`. Lab peers: `BANKING_CIRCLE_URL` on b4b (the bridge, `:8095`), `BC_INTERNAL_URL` on worldline and settlement (the bridge), `CONSOLE_URL_BANKING_CIRCLE` on the lab API (the control port is its port + 1000, or `CONSOLE_CONTROL_URL_BANKING_CIRCLE`), `BANKING_CIRCLE_URL` (`:8085`) on the e2e suite, which reaches the rest through the lab API. The same name `BANKING_CIRCLE_URL` means the bridge on b4b and the Connect API in the e2e suite |
 | Activity logs | `GET /sim/activity` (on the control port) keeps four logs. `payments` (*Payments received*): `payment.create` for each `POST /internal/payments`, `payment.incoming` for each `POST /internal/incoming-payments` and `POST /sim/incoming-payments`, written from the caller's request so a refused one still shows its amount; `payment.state` for each state a trap's step took a payout to, with `detail.trap` (green when processed, amber otherwise). `notifications` (*Notifications sent*): `notification` for each encrypted batch POST (every retry is its own line; red on a non-2xx or a refused connection), `notification.queued` for each batch parked behind a pause, `notification.pause` for each pause and resume; a batch carrying a notification a trap's step made has `detail.trap` (the trap ids, comma-separated). `reports` (*Reconciliation reads*): `report.intraday`, `report.rejection` and `payment.status`, amber when refused or not found. `traps` (*Traps*): `trap.armed`, `trap.caught`, `trap.step`, `trap.diverted` (amber), `trap.disarmed`, each with `detail.trap`. Each event carries `env` when it is not the default environment's, and `?env=` picks whose are shown. `POST /sim/reset` empties all four for the environment it resets |
-| Configuration | The important variables are in the table below. Seeded on the first start (no state file, or an empty one), the default environment's: the safeguarding accounts `00000000-0000-4000-8000-000000000978` (EUR, vIBAN `BE00SIMSGA00000001`) and `00000000-0000-4000-8000-000000000826` (GBP, `GB00SIMSGA00000001`), both `0.00`; and one active subscription to `WEBHOOK_URL`, subscribed subscription-wide (target type `1`, no targets) to `OutgoingPaymentBooked`, `OutgoingPaymentProcessed`, `OutgoingPaymentRejected`, `MissingFunding`, `Reversed`, `IncomingPaymentProcessed`, `IncomingPaymentBooked` and `PaymentStatus`. Everything the bank is told is written to `BC_STATE_PATH` and survives a restart, work in flight included; the traps and the activity logs do not ([State file](#state-file)). `POST /sim/reset` forgets the run and keeps the subscriptions, accounts and tokens (`flow`), or puts back this seed and keeps the tokens (`all`), in the environment it names |
+| Configuration | The important variables are in the table below. Seeded on the first start (no state file, or an empty one), the default environment's: the safeguarding accounts `00000000-0000-4000-8000-000000000978` (EUR, vIBAN `BE00SIMSGA00000001`) and `00000000-0000-4000-8000-000000000826` (GBP, `GB00SIMSGA00000001`), both `0.00`; and one subscription to `WEBHOOK_URL` (the receiver stand-in's), inactive unless `BC_SEED_SUBSCRIPTION_ACTIVE` says otherwise, subscribed subscription-wide (target type `1`, no targets) to `OutgoingPaymentBooked`, `OutgoingPaymentProcessed`, `OutgoingPaymentRejected`, `MissingFunding`, `Reversed`, `IncomingPaymentProcessed`, `IncomingPaymentBooked` and `PaymentStatus`. Everything the bank is told is written to `BC_STATE_PATH` and survives a restart, work in flight included; the traps and the activity logs do not ([State file](#state-file)). `POST /sim/reset` forgets the run and keeps the subscriptions, accounts and tokens (`flow`), or puts back this seed and keeps the tokens (`all`), in the environment it names |
 | Design record | [ARCHITECTURE-banking-circle-webhooks.md](../../ARCHITECTURE-banking-circle-webhooks.md) (subscriptions, batching, retries, the lab-only endpoints), [ARCHITECTURE-vendor-corrections.md](../../ARCHITECTURE-vendor-corrections.md) §3 and Addendum B, C, G and H (auth, webhook cipher, the bridge, two listeners, UUID account ids, the reconciliation reads), [ARCHITECTURE-phase3-corrections.md](../../ARCHITECTURE-phase3-corrections.md) §1 (the safeguarding-account model), [structure/banking-circle.md](../../structure/banking-circle.md). [ARCHITECTURE-banking-circle.md](../../ARCHITECTURE-banking-circle.md) is superseded |
 
 | Variable | Default | Effect |
@@ -43,6 +43,7 @@ stopped.
 | `WEBHOOK_ALLOWLIST` | `receiver,receiver:8443,localhost,127.0.0.1` (compose adds `bank`, `bank:8081`, `host.containers.internal`) | Hosts a subscription endpoint and `BANK_CREDIT_URL` may name |
 | `BC_NOTIFICATION_KEY` | `sim-bc-notification-key-32-chars` | Exactly 32 characters or start-up fails. The seeded subscription's key, and the key of a subscription created without one |
 | `BC_SEED_BATCH_SIZE`, `BC_SEED_SUBSCRIPTION_EMAIL` | `5`, `alerts@fintechlab-simple.local` | The seeded subscription's `maxNotificationsPerMessage` and `email` |
+| `BC_SEED_SUBSCRIPTION_ACTIVE` | `false` | `true` seeds the subscription active. It is the receiver stand-in's wiring, which starts off: beside a platform's own subscription it is a second listener taking every batch. Read only when the bank seeds, on its first start; after that the subscription is the state file's, switched with `POST /sim/subscription/{id}/activate` or `POST /v1/stand-ins/receiver` |
 | `BC_DELIVERY_CONFIG` | `/config/banking-circle.json` | Retry schedule, email steps, `batch_flush_interval` (2 s), default batch size. A missing file means the documented schedule at real time |
 | `BC_TIME_SCALE` | unset (compose `86400`) | Overrides the file's `time_scale` (3600): every retry delay is divided by it. At 86400 the whole schedule takes about four seconds |
 | `BANK_CREDIT_URL` | empty (compose `http://bank:8081/internal/credit`) | Where a processed payout is credited. Empty turns that hop off |
@@ -344,9 +345,15 @@ Switches a subscription off.
 Removes a subscription and its events. Irreversible.
 
 - Headers: `If-Match: <rowVersion>`.
-- Answers `200` with an empty body. `404`; `412`.
-- Side effects: a batch already in its retry schedule is abandoned at the
-  next retry; a queued batch is dropped at flush.
+- Answers `200` with an empty body. `404`; `412`; `500` when the
+  subscription is deleted but the state file could not be written.
+- Side effects: a batch on its way out stops at its next attempt, in its
+  retry schedule or waiting its turn in a release; only a send already on
+  the wire finishes, and it is not retried. What the bank held for the
+  subscription is dropped with it: the batch filling up, what a pause
+  parked and the pause, and what it retained. `subscription.delete` in the
+  `notifications` log. The state file is written before it answers, so a
+  restart does not bring the subscription back.
 
 ### `POST /api/v1/notificationselfservice/subscriptionEvent`
 
@@ -1162,6 +1169,42 @@ the concurrency check. Answers as the vendor's does, `200`
 `PUT …/subscription/{id}/deactivate` without `If-Match`. Answers `200`
 with the subscription, as the vendor's does; `404`; never `412`.
 
+### `DELETE /sim/subscription/{subscriptionId}`
+
+`DELETE …/subscription/{id}` without `If-Match`. Answers `200`
+`{"subscriptionId": "sub_8f3e1a0c2b6d", "endpoint": "https://…", "deleted": true, "dropped": 3}`;
+`404` for an id the environment does not have; never `412`; `500` when
+the subscription is deleted but the state file could not be written.
+
+- Side effects: the vendor's, and what the bank held for the subscription
+  goes with it: the batch filling up, what a pause parked and the pause,
+  what it retained after the retry schedule gave up, and the batches on
+  their way out, which stop at their next attempt. `dropped` counts those
+  notifications: every one that will now never be sent. A send on the wire
+  at that moment is not counted (the endpoint may still acknowledge it)
+  and is not retried. `subscription.delete` in the `notifications` log.
+  The state file is written before it answers. The vendor's own `DELETE`
+  does all the same.
+
+### `POST /sim/subscriptions/reset`
+
+The environment's subscriptions back as start-up left them, and nothing
+else: the default environment's seeded subscription is put back as it was
+seeded and every other one of its subscriptions deleted; a customer's are
+all deleted. `?env=*` resets every environment's.
+
+- Answers `200` `{"env": "default", "cleared": {"subscriptions": 2, "notifications": 4, "pauses": 1}}`.
+  `subscriptions` counts each one deleted and each seeded one put back
+  because it had been deleted or written to since; `notifications` and
+  `pauses` are what went with the deleted ones and what the seeded one
+  held.
+- Side effects: as `DELETE /sim/subscription/{subscriptionId}` for each one
+  deleted, without the log entries. The seeded one comes back as start-up
+  left it: not paused, nothing parked behind a pause, nothing retained
+  after a deactivation. Its batch filling up and its batches on their way
+  out still go. Payments, balances, accounts and tokens do not change. The
+  state file is written before it answers.
+
 ### `GET /accounts`
 
 Introspection: every ledger account.
@@ -1312,6 +1355,10 @@ order, after anything already queued. A shortcut for traps
   (`POST /v1/banking-circle/subscriptions/{id}/test`);
   `POST /sim/subscription/{subscriptionId}/pause` and `/resume`
   (`POST /v1/banking-circle/subscriptions/{id}/pause`, `/resume`);
+  `DELETE /sim/subscription/{subscriptionId}`
+  (`DELETE /v1/banking-circle/subscriptions/{id}`);
+  `POST /sim/subscriptions/reset`
+  (`POST /v1/banking-circle/subscriptions/reset`);
   `GET /sim/payments` (`GET /v1/banking-circle/payouts`);
   `POST /sim/payments/{id}/return` and `/reverse`
   (`POST /v1/banking-circle/payouts/{id}/return`, `/reverse`);

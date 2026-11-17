@@ -102,13 +102,17 @@ func labCalls(t *testing.T, a *app, subID string) []labCall {
 	t.Helper()
 	sub := "/sim/subscription/" + subID
 	byPattern := map[string]labCall{
-		"GET /sim/info":                                         {path: "/sim/info", want: 200},
-		"GET /sim/logs":                                         {path: "/sim/logs", want: 200},
-		"POST /sim/reset":                                       {path: "/sim/reset", body: `{"scope":"flow"}`, want: 200},
-		"GET /sim/activity":                                     {path: "/sim/activity", want: 200},
-		"GET /sim/emails":                                       {path: "/sim/emails", want: 200},
-		"GET /sim/delivery-config":                              {path: "/sim/delivery-config", want: 200},
-		"GET /sim/subscriptions":                                {path: "/sim/subscriptions", want: 200},
+		"GET /sim/info":                 {path: "/sim/info", want: 200},
+		"GET /sim/logs":                 {path: "/sim/logs", want: 200},
+		"POST /sim/reset":               {path: "/sim/reset", body: `{"scope":"flow"}`, want: 200},
+		"GET /sim/activity":             {path: "/sim/activity", want: 200},
+		"GET /sim/emails":               {path: "/sim/emails", want: 200},
+		"GET /sim/delivery-config":      {path: "/sim/delivery-config", want: 200},
+		"GET /sim/subscriptions":        {path: "/sim/subscriptions", want: 200},
+		"POST /sim/subscriptions/reset": {path: "/sim/subscriptions/reset", want: 200},
+		// An unknown id: DELETE sorts first, and the routes after it need
+		// the subscription. TestTheLabDeletesASubscription deletes one.
+		"DELETE /sim/subscription/{subscriptionId}":             {path: "/sim/subscription/sub_nope", want: 404},
 		"POST /sim/subscription/{subscriptionId}/test":          {path: sub + "/test", want: 200},
 		"POST /sim/subscription/{subscriptionId}/activate":      {path: sub + "/activate", want: 200},
 		"POST /sim/subscription/{subscriptionId}/deactivate":    {path: sub + "/deactivate", want: 200},
@@ -116,14 +120,14 @@ func labCalls(t *testing.T, a *app, subID string) []labCall {
 		"GET /sim/subscription/{subscriptionId}/pending":        {path: sub + "/pending", want: 200},
 		"POST /sim/subscription/{subscriptionId}/pause":         {path: sub + "/pause", want: 200},
 		"POST /sim/subscription/{subscriptionId}/resume":        {path: sub + "/resume", want: 200},
-		"GET /sim/accounts":                                     {path: "/sim/accounts", want: 200},
-		"GET /sim/accounts/{accountId}/balances":                {path: "/sim/accounts/" + sgaEUR + "/balances", want: 200},
-		"GET /sim/payments":                                     {path: "/sim/payments", want: 200},
-		"POST /sim/incoming-payments":                           {path: "/sim/incoming-payments", body: `{"currency":"EUR","amount":"1.00","reference":"ctl"}`, want: 202},
-		"GET /sim/payments/outcomes":                            {path: "/sim/payments/outcomes", want: 200},
-		"POST /sim/payments/outcomes":                           {path: "/sim/payments/outcomes", body: `{"outcomes":[]}`, want: 200},
-		"POST /sim/payments/{id}/return":                        {path: "/sim/payments/bcp_nope/return", want: 404},
-		"POST /sim/payments/{id}/reverse":                       {path: "/sim/payments/bcp_nope/reverse", want: 404},
+		"GET /sim/accounts":                      {path: "/sim/accounts", want: 200},
+		"GET /sim/accounts/{accountId}/balances": {path: "/sim/accounts/" + sgaEUR + "/balances", want: 200},
+		"GET /sim/payments":                      {path: "/sim/payments", want: 200},
+		"POST /sim/incoming-payments":            {path: "/sim/incoming-payments", body: `{"currency":"EUR","amount":"1.00","reference":"ctl"}`, want: 202},
+		"GET /sim/payments/outcomes":             {path: "/sim/payments/outcomes", want: 200},
+		"POST /sim/payments/outcomes":            {path: "/sim/payments/outcomes", body: `{"outcomes":[]}`, want: 200},
+		"POST /sim/payments/{id}/return":         {path: "/sim/payments/bcp_nope/return", want: 404},
+		"POST /sim/payments/{id}/reverse":        {path: "/sim/payments/bcp_nope/reverse", want: 404},
 	}
 	patterns := append([]string{}, contractRoutes...)
 	for p := range a.simRoutes() {

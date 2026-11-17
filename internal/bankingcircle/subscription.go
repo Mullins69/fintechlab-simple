@@ -523,10 +523,7 @@ func (s *SubscriptionStore) Delete(id, ifMatch string) error {
 	if err := checkRowVersion(sub.RowVersion, ifMatch); err != nil {
 		return err
 	}
-	for _, e := range sub.Events {
-		delete(s.events, e.ID)
-	}
-	delete(s.subs, id)
+	s.deleteLocked(id)
 	changed(s.OnChange)
 	return nil
 }
@@ -726,10 +723,7 @@ func (s *SubscriptionStore) restoreLocked(scope string, st subscriptionState) in
 		if was, ok := seed[id]; !ok || !sameVersion(was, sub) {
 			changed++ // not the seed's, or written to since
 		}
-		for _, e := range sub.Events {
-			delete(s.events, e.ID)
-		}
-		delete(s.subs, id)
+		s.deleteLocked(id)
 	}
 	others := len(s.subs)
 	subs, events := copySubscriptions(seed)

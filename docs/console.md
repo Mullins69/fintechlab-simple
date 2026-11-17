@@ -296,15 +296,18 @@ some stay open. A root is only swept an hour after its settlement *by the
 lab clock*: after a run, press *+1 hour* on the Lab clock card, sweep, then
 *Now*.
 
-### Stand-ins: disconnect and hide
+### Stand-ins: off unless connected
 
 The **settlement** service and the **webhook receiver** played the
 platform's part while the lab was being built — the settlement service
 pulls Worldline's files every ten seconds and pays outlets at the daily
 cutoff; Banking Circle's seeded subscription and ACI deliver to the
-receiver. With a real platform plugged in they are noise: payouts at B4B
-nobody made, deliveries to a listener that is not yours, a Worldline
-*connect + list* arrow that is not your platform connecting.
+receiver. With a real platform plugged in they are worse than noise: the
+settlement service takes the same morning file the platform takes and pays
+every outlet a second time, out of the one lump sum, so the platform's own
+payouts end `MissingFunding`; and the receiver takes every webhook batch a
+second time. So their wiring **starts off**, and is for developing the lab
+with no platform plugged in: connect it then, and only then.
 
 Each stand-in's card has a **Stand-in** section listing its wiring, read
 live from the services that own it, and two buttons:
@@ -325,18 +328,24 @@ so they can be hidden, not disconnected. Their cards say what they play, and
 each now keeps a log (*Payments received*, *Webhooks delivered*) so it is
 plain whether anything has called them.
 
-**Every stand-in card starts hidden.** With a platform plugged in they are
-noise; developing a vendor without one, you want them, and the place to
-switch them is **Configuration → Stand-ins**: one table with what each
-plays, how it is wired right now, *Connect* / *Disconnect* (live, where the
-wiring lives) and *Show card* / *Hide card*. The Platform view lists the
-hidden ones in a note linking there, and a hidden receiver is said under
-the diagram, with how many batches still went to it.
-`CONSOLE_STAND_INS_SHOWN=true` on the console starts the cards shown. The
-wiring starts connected, so the lab runs end to end with no platform:
-`SETTLEMENT_CONNECTED=false` on the settlement service and
-`ACI_WEBHOOK_CONNECTED=false` on ACI start it off — read at start-up, so
-they take a `make up`.
+**Every stand-in card starts hidden, and its wiring disconnected.** With a
+platform plugged in they are in the way; developing a vendor without one,
+you want them, and the place to switch them is **Configuration →
+Stand-ins**: one table with what each plays, how it is wired right now,
+*Connect* / *Disconnect* (live, where the wiring lives) and *Show card* /
+*Hide card*. The Platform view lists the hidden ones in a note linking
+there, and a hidden receiver is said under the diagram, with how many
+batches still went to it. `CONSOLE_STAND_INS_SHOWN=true` on the console
+starts the cards shown.
+
+`make stand-ins-on` connects both from a shell (`make stand-ins-off`
+disconnects them), through the lab API. The settlement and ACI switches
+are held in memory, so a `make up` or `make pod-up` starts them off again;
+to have them start connected instead, set `SETTLEMENT_CONNECTED=true` on
+the settlement service and `ACI_WEBHOOK_CONNECTED=true` on ACI, and
+`BC_SEED_SUBSCRIPTION_ACTIVE=true` on Banking Circle for its seeded
+subscription — which it reads only when it seeds, on its first start (no
+state file), since after that the subscription is the state file's.
 
 A platform can ask for this itself, in its descriptor's `stand_ins`
 ([plugins.md](plugins.md#stand-ins)). The lab API applies that when the
@@ -348,8 +357,8 @@ lab API restart.
 
 ```sh
 curl -s localhost:8097/v1/stand-ins                                           # each stand-in, its wiring, live
-curl -s -XPOST localhost:8097/v1/stand-ins/receiver -d '{"connected":false}'  # disconnect
-curl -s -XPOST localhost:8097/v1/stand-ins/settlement -d '{"shown":false}'    # hide
+curl -s -XPOST localhost:8097/v1/stand-ins/receiver -d '{"connected":true}'   # connect, for the lab on its own
+curl -s -XPOST localhost:8097/v1/stand-ins/settlement -d '{"shown":true}'     # show its card
 ```
 
 ### The lab clock
@@ -458,6 +467,19 @@ endpoint actually did:
 Endpoint took it     batch of 1 to https://receiver:8443/raw-events — PaymentStatus
 Nothing took it      … — Post "https://receiver:8443/raw-events": dial tcp: lookup …
 ```
+
+Each row shows the subscription's **id** under its endpoint, the name the
+platform's logs and the vendor's API use for it. **Delete** removes the
+subscription (`DELETE /v1/banking-circle/subscriptions/{id}`): Banking
+Circle stops calling the endpoint, and whatever was waiting for it goes too,
+a pause included. It is the vendor's own delete without the `If-Match` the
+real API wants, and it shows in **Notifications sent** as
+`subscription.delete`. Subscriptions outlive a restart now, so this is how
+a run's leftover one goes. A platform that subscribes on boot subscribes
+again when it next starts. To clear every subscription a run made in one
+call, use `POST /v1/banking-circle/subscriptions/reset`. It puts back only
+the seeded subscription and leaves the bank's money alone. The card has no
+button for it.
 
 ### Pausing notifications
 

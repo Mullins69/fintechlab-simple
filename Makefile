@@ -20,7 +20,7 @@ ENGINE ?= $(shell if docker version >/dev/null 2>&1; then echo docker; \
 # podman-compose 1.x does not implement Compose "profiles".
 COMPOSE_IS_PODMAN := $(findstring podman,$(COMPOSE))
 
-.PHONY: help keys-migrate keys-regenerate certs sftp-dirs key-dirs console-dir b4b-dir bc-dir up start down logs test vet fmt-check demo-payment console e2e e2e-docker tidy rebuild pod-images pod-up pod-down pod-bundle cloud-manifest cloud-bundle
+.PHONY: help keys-migrate keys-regenerate certs sftp-dirs key-dirs console-dir b4b-dir bc-dir up start down logs test vet fmt-check demo-payment console e2e e2e-docker stand-ins-on stand-ins-off tidy rebuild pod-images pod-up pod-down pod-bundle cloud-manifest cloud-bundle
 
 help:
 	@echo "make up             build, replace the containers, start the lab"
@@ -28,7 +28,8 @@ help:
 	@echo "make demo-payment   create a payment and wait for the webhook"
 	@echo "make e2e            run the end-to-end scenarios locally (go run)"
 	@echo "make e2e-docker     build+run the e2e suite as one container against the compose network"
-	@echo "make test           unit tests + vet + gofmt check (no Docker required)"
+	@echo "make stand-ins-on   connect the platform stand-ins, for the lab with no platform (stand-ins-off undoes it)"
+	@echo "make test          unit tests + vet + gofmt check (no Docker required)"
 	@echo "make start          bring the lab back up without rebuilding"
 	@echo "make down           compose down"
 	@echo "make keys-regenerate new PKI and keypairs in LAB_KEYS_DIR ($(LAB_KEYS_DIR)), lab restarted"
@@ -193,6 +194,27 @@ up: certs sftp-dirs key-dirs console-dir b4b-dir bc-dir
 	@echo "lab API:       http://127.0.0.1:8097/v1 (docs/api/lab-api.md)$(if $(LAB_API_TOKEN), -- asks for LAB_API_TOKEN)"
 	@echo "next: make demo-payment  (or: make e2e)"
 
+
+# The stand-ins (settlement, receiver) play the platform's part, for
+# developing the lab with no platform plugged in. Their wiring starts off --
+# with a platform plugged in they pay every outlet a second time and take
+# every webhook batch twice -- and these switch it live, through the lab API
+# (with LAB_API_TOKEN when it asks for one). The settlement and ACI switches
+# are held in memory, so a make up or pod-up starts them off again; the
+# variables that start them on are in docs/console.md, Stand-ins.
+LAB_API_URL ?= http://127.0.0.1:8097
+STAND_INS_SWITCH = for s in settlement receiver; do \
+	printf '%s: ' "$$s"; \
+	curl -sS -X POST "$(LAB_API_URL)/v1/stand-ins/$$s" -H 'Content-Type: application/json' \
+		$${LAB_API_TOKEN:+-H "Authorization: Bearer $$LAB_API_TOKEN"} -d '{"connected": $(1)}' \
+		| sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p'; \
+	done
+
+stand-ins-on:
+	@$(call STAND_INS_SWITCH,true)
+
+stand-ins-off:
+	@$(call STAND_INS_SWITCH,false)
 
 # The console embeds its web assets, and the lab API serves the routes the
 # page calls, so the two are rebuilt together. --no-cache is for when a warm

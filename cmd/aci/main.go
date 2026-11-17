@@ -123,8 +123,10 @@ func main() {
 		targetURL: targetURL,
 		bodyMode:  bodyMode,
 		sent:      aci.NewSentLog(),
+		// Off unless asked for, as every stand-in's wiring is: the
+		// receiver is a second listener once a platform is plugged in.
 		wiring: labswitch.FromEnv("aci", "delivers webhooks to ACI_WEBHOOK_TARGET_URL",
-			env("ACI_WEBHOOK_CONNECTED", "true")).Target(targetURL),
+			env("ACI_WEBHOOK_CONNECTED", "false")).Target(targetURL),
 		customers: tenant.NewCustomers(),
 	}
 
