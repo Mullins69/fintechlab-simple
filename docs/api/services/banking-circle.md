@@ -344,9 +344,15 @@ Switches a subscription off.
 Removes a subscription and its events. Irreversible.
 
 - Headers: `If-Match: <rowVersion>`.
-- Answers `200` with an empty body. `404`; `412`.
-- Side effects: a batch already in its retry schedule is abandoned at the
-  next retry; a queued batch is dropped at flush.
+- Answers `200` with an empty body. `404`; `412`; `500` when the
+  subscription is deleted but the state file could not be written.
+- Side effects: a batch on its way out stops at its next attempt, in its
+  retry schedule or waiting its turn in a release; only a send already on
+  the wire finishes, and it is not retried. What the bank held for the
+  subscription is dropped with it: the batch filling up, what a pause
+  parked and the pause, and what it retained. `subscription.delete` in the
+  `notifications` log. The state file is written before it answers, so a
+  restart does not bring the subscription back.
 
 ### `POST /api/v1/notificationselfservice/subscriptionEvent`
 
@@ -1162,6 +1168,42 @@ the concurrency check. Answers as the vendor's does, `200`
 `PUT …/subscription/{id}/deactivate` without `If-Match`. Answers `200`
 with the subscription, as the vendor's does; `404`; never `412`.
 
+### `DELETE /sim/subscription/{subscriptionId}`
+
+`DELETE …/subscription/{id}` without `If-Match`. Answers `200`
+`{"subscriptionId": "sub_8f3e1a0c2b6d", "endpoint": "https://…", "deleted": true, "dropped": 3}`;
+`404` for an id the environment does not have; never `412`; `500` when
+the subscription is deleted but the state file could not be written.
+
+- Side effects: the vendor's, and what the bank held for the subscription
+  goes with it: the batch filling up, what a pause parked and the pause,
+  what it retained after the retry schedule gave up, and the batches on
+  their way out, which stop at their next attempt. `dropped` counts those
+  notifications: every one that will now never be sent. A send on the wire
+  at that moment is not counted (the endpoint may still acknowledge it)
+  and is not retried. `subscription.delete` in the `notifications` log.
+  The state file is written before it answers. The vendor's own `DELETE`
+  does all the same.
+
+### `POST /sim/subscriptions/reset`
+
+The environment's subscriptions back as start-up left them, and nothing
+else: the default environment's seeded subscription is put back as it was
+seeded and every other one of its subscriptions deleted; a customer's are
+all deleted. `?env=*` resets every environment's.
+
+- Answers `200` `{"env": "default", "cleared": {"subscriptions": 2, "notifications": 4, "pauses": 1}}`.
+  `subscriptions` counts each one deleted and each seeded one put back
+  because it had been deleted or written to since; `notifications` and
+  `pauses` are what went with the deleted ones and what the seeded one
+  held.
+- Side effects: as `DELETE /sim/subscription/{subscriptionId}` for each one
+  deleted, without the log entries. The seeded one comes back as start-up
+  left it: not paused, nothing parked behind a pause, nothing retained
+  after a deactivation. Its batch filling up and its batches on their way
+  out still go. Payments, balances, accounts and tokens do not change. The
+  state file is written before it answers.
+
 ### `GET /accounts`
 
 Introspection: every ledger account.
@@ -1312,6 +1354,10 @@ order, after anything already queued. A shortcut for traps
   (`POST /v1/banking-circle/subscriptions/{id}/test`);
   `POST /sim/subscription/{subscriptionId}/pause` and `/resume`
   (`POST /v1/banking-circle/subscriptions/{id}/pause`, `/resume`);
+  `DELETE /sim/subscription/{subscriptionId}`
+  (`DELETE /v1/banking-circle/subscriptions/{id}`);
+  `POST /sim/subscriptions/reset`
+  (`POST /v1/banking-circle/subscriptions/reset`);
   `GET /sim/payments` (`GET /v1/banking-circle/payouts`);
   `POST /sim/payments/{id}/return` and `/reverse`
   (`POST /v1/banking-circle/payouts/{id}/return`, `/reverse`);

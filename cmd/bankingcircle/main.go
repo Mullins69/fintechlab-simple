@@ -459,9 +459,12 @@ func (a *app) simRoutes() map[string]http.HandlerFunc {
 		"GET /sim/delivery-config": a.deliveryConfig,
 
 		// Subscriptions: the vendor's list, its clienttest and its
-		// activate/deactivate (here without If-Match), and the lab's tap on
-		// the notification pipe.
+		// activate/deactivate/delete (here without If-Match), the reset of
+		// one environment's back to the seed, and the lab's tap on the
+		// notification pipe.
 		"GET /sim/subscriptions":                                a.simListSubscriptions,
+		"POST /sim/subscriptions/reset":                         a.simResetSubscriptions,
+		"DELETE /sim/subscription/{subscriptionId}":             a.simDeleteSubscription,
 		"POST /sim/subscription/{subscriptionId}/test":          a.clientTest,
 		"POST /sim/subscription/{subscriptionId}/activate":      a.simActivateSubscription,
 		"POST /sim/subscription/{subscriptionId}/deactivate":    a.simDeactivateSubscription,

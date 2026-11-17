@@ -96,14 +96,15 @@ var routeClasses = map[string]string{
 // environment at once ("*"): lab-wide reads and resets the sims answer
 // for all of them. The rest work in one environment.
 var allScoped = map[string]bool{
-	"POST /v1/lab/reset":                   true,
-	"POST /v1/services/{id}/reset":         true,
-	"GET /v1/services/{id}/activity":       true,
-	"GET /v1/traps":                        true,
-	"DELETE /v1/traps":                     true,
-	"GET /v1/banking-circle/payouts":       true,
-	"GET /v1/banking-circle/subscriptions": true,
-	"ANY /v1/services/{id}/sim/{path...}":  true,
+	"POST /v1/lab/reset":                          true,
+	"POST /v1/services/{id}/reset":                true,
+	"GET /v1/services/{id}/activity":              true,
+	"GET /v1/traps":                               true,
+	"DELETE /v1/traps":                            true,
+	"GET /v1/banking-circle/payouts":              true,
+	"GET /v1/banking-circle/subscriptions":        true,
+	"POST /v1/banking-circle/subscriptions/reset": true,
+	"ANY /v1/services/{id}/sim/{path...}":         true,
 }
 
 func (rt route) class() string {

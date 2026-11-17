@@ -459,6 +459,19 @@ Endpoint took it     batch of 1 to https://receiver:8443/raw-events — PaymentS
 Nothing took it      … — Post "https://receiver:8443/raw-events": dial tcp: lookup …
 ```
 
+Each row shows the subscription's **id** under its endpoint, the name the
+platform's logs and the vendor's API use for it. **Delete** removes the
+subscription (`DELETE /v1/banking-circle/subscriptions/{id}`): Banking
+Circle stops calling the endpoint, and whatever was waiting for it goes too,
+a pause included. It is the vendor's own delete without the `If-Match` the
+real API wants, and it shows in **Notifications sent** as
+`subscription.delete`. Subscriptions outlive a restart now, so this is how
+a run's leftover one goes. A platform that subscribes on boot subscribes
+again when it next starts. To clear every subscription a run made in one
+call, use `POST /v1/banking-circle/subscriptions/reset`. It puts back only
+the seeded subscription and leaves the bank's money alone. The card has no
+button for it.
+
 ### Pausing notifications
 
 **Pause** stops Banking Circle delivering to one subscription. Everything it
