@@ -237,8 +237,8 @@ func TestTheGatewaysUKBoardingChainRunsEndToEnd(t *testing.T) {
 	if office["type"] != "registered_office" || office["line_1"] != "1 Simulation Way" || office["postcode"] != "EC1A 1AA" {
 		t.Fatalf("company address = %v, want the registered office in the gateway's field names", office)
 	}
-	if _, legacy := office["address_line_1"]; legacy {
-		t.Errorf("the answer carries the lab's earlier address names: %v", office)
+	if office["address_line_1"] != "1 Simulation Way" || office["postal_code"] != "EC1A 1AA" {
+		t.Errorf("the answer drops the lab's earlier address names, which its other clients read: %v", office)
 	}
 
 	// addAddress reads id, and uses it: the owner's becomes the person's

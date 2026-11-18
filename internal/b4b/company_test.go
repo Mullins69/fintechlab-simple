@@ -82,8 +82,8 @@ func TestCreateCompanyMaterializesRegisteredOffice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addresses: %v", err)
 	}
-	if len(addrs) != 1 || addrs[0].Type != RegisteredOffice || addrs[0].City != "London" {
-		t.Fatalf("addresses = %+v, want one registered_office London address", addrs)
+	if len(addrs) != 1 || addrs[0].Type != defaultInlineAddressType || addrs[0].City != "London" {
+		t.Fatalf("addresses = %+v, want one registered London address", addrs)
 	}
 	if c.Address == nil || c.Address.ID != addrs[0].ID {
 		t.Fatalf("the company's address %+v should carry the stored address's id %s", c.Address, addrs[0].ID)
@@ -343,9 +343,8 @@ func TestRecordsAreStampedOnTheRunnersClock(t *testing.T) {
 	}
 }
 
-// The lab's first address spellings still board a company, and are answered
-// in the gateway's: a body written against the old names keeps working,
-// and no answer carries two names for one field.
+// The lab's first address spellings still board a company, and the answer
+// carries both spellings: a client written against either keeps working.
 func TestAddressTakesTheEarlierSpellingsAndAnswersTheGateways(t *testing.T) {
 	d := NewDirectory(nil)
 	p := gbCompany()
@@ -358,8 +357,8 @@ func TestAddressTakesTheEarlierSpellingsAndAnswersTheGateways(t *testing.T) {
 	if got.Line1 != "1 Old Way" || got.Line2 != "Unit 2" || got.Postcode != "EC1A 1AA" {
 		t.Fatalf("address = %+v, want the earlier spellings folded into line_1, line_2, postcode", got)
 	}
-	if got.AddressLine1 != "" || got.AddressLine2 != "" || got.PostalCode != "" {
-		t.Fatalf("address = %+v still carries the earlier spellings", got)
+	if got.AddressLine1 != "1 Old Way" || got.AddressLine2 != "Unit 2" || got.PostalCode != "EC1A 1AA" {
+		t.Fatalf("address = %+v, want the earlier spellings answered too", got)
 	}
 	both := Address{Line1: "gateway", AddressLine1: "lab", City: "London", Country: "GB"}.normalized()
 	if both.Line1 != "gateway" {

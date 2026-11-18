@@ -166,7 +166,7 @@ func (d *Directory) CreateCompany(p CompanyParams) (*Company, error) {
 		office.ID = d.newID("adr")
 	}
 	if office.Type == "" {
-		office.Type = RegisteredOffice
+		office.Type = defaultInlineAddressType
 	}
 	c := &Company{
 		ID:                     cid,
