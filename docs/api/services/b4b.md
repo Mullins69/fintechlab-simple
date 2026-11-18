@@ -188,9 +188,10 @@ Body, as the gateway sends it:
 `trading_name` is accepted too. `legal_name` and `address` are required;
 the address needs `line_1`, `city` and a two-letter `country` (`line_2`,
 `line_3`, `region`, `postcode` optional; `type` defaults to
-`registered_office`; an `id` is kept as the address's id). Earlier
-spellings, still accepted: `address_line_1`, `address_line_2`,
-`postal_code`; a value under the gateway's name wins. `merchant_category_code`,
+`registered`, and the gateway sends `registered_office`; an `id` is kept as
+the address's id). Earlier spellings, still accepted: `address_line_1`,
+`address_line_2`, `postal_code`; a value under the gateway's name wins.
+Every address answer carries both spellings with the same values. `merchant_category_code`,
 when present, must be four digits. The two waiver flags switch off the
 document requirements on the extended profile and on natural persons.
 

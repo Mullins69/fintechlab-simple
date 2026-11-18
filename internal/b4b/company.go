@@ -47,8 +47,7 @@ const (
 // against the real vendor. This lab's first reading of the vendor docs
 // spelled them address_line_1 and postal_code; those are still accepted on
 // the way in, so a body or a state file written in them keeps working, and
-// folded into the gateway's names by normalized. Answers carry only the
-// gateway's names.
+// answers carry both spellings, so a client reading either keeps working.
 type Address struct {
 	Line1    string `json:"line_1"`
 	Line2    string `json:"line_2,omitempty"`
@@ -58,15 +57,15 @@ type Address struct {
 	Postcode string `json:"postcode"`
 	Country  string `json:"country"`
 
-	// The lab's earlier spellings, accepted on input only.
+	// The lab's earlier spellings, accepted on input and answered beside the gateway's.
 	AddressLine1 string `json:"address_line_1,omitempty"`
 	AddressLine2 string `json:"address_line_2,omitempty"`
 	PostalCode   string `json:"postal_code,omitempty"`
 }
 
-// normalized is a with the earlier spellings folded into the gateway's: a
-// value under the gateway's name wins, and the earlier names are emptied so
-// they never reach an answer.
+// normalized is a with the earlier spellings folded into the gateway's (a
+// value under the gateway's name wins) and mirrored back, so both spellings
+// carry the same value.
 func (a Address) normalized() Address {
 	if a.Line1 == "" {
 		a.Line1 = a.AddressLine1
@@ -77,7 +76,7 @@ func (a Address) normalized() Address {
 	if a.Postcode == "" {
 		a.Postcode = a.PostalCode
 	}
-	a.AddressLine1, a.AddressLine2, a.PostalCode = "", "", ""
+	a.AddressLine1, a.AddressLine2, a.PostalCode = a.Line1, a.Line2, a.Postcode
 	return a
 }
 
@@ -423,14 +422,17 @@ type CompanyParams struct {
 	CompanyDocumentsWaived bool   `json:"company_documents_waived"`
 	PersonDocumentsWaived  bool   `json:"person_documents_waived"`
 	// Address is the registered office. The gateway sends its type
-	// (registered_office) inside it; the type defaults to that.
+	// (registered_office) inside it; without one it is stored as registered.
 	Address *AddressParams `json:"address"`
 	Extra   map[string]any `json:"-"`
 }
 
-// RegisteredOffice is the type an inline company address is stored under
-// when it names none: the gateway's name for it.
+// RegisteredOffice is the gateway's type for the inline company address.
 const RegisteredOffice = "registered_office"
+
+// defaultInlineAddressType is what an inline company address is stored
+// under when it names no type, as before the gateway's type was accepted.
+const defaultInlineAddressType = "registered"
 
 // Validate applies the rules a real create refuses on.
 func (p CompanyParams) Validate() error {
@@ -440,7 +442,7 @@ func (p CompanyParams) Validate() error {
 	if p.Address == nil {
 		return fmt.Errorf("%w: address (the registered office) is required", ErrInvalid)
 	}
-	// The type is optional here: it defaults to registered_office.
+	// The type is optional here: it defaults to registered.
 	if err := p.Address.Address.Validate(); err != nil {
 		return err
 	}

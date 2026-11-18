@@ -155,15 +155,15 @@ names and required markers were checked against the vendor's spec. Where
 the two disagreed on a boarding route, this lab changed to the gateway's
 shape; none of the lab's readings cited vendor evidence that contradicts
 it. The lab's earlier names stay accepted on input, so this lab's own e2e
-suite, older bodies and older state files keep working, and answers carry
-the gateway's names. `cmd/b4b/gateway_test.go` holds the lab to the
+suite, older bodies and older state files keep working, and address
+answers carry both spellings. `cmd/b4b/gateway_test.go` holds the lab to the
 gateway's exact bodies.
 
 What changed, route by route:
 
 | Route | The lab had | The gateway sends / reads | Now |
 | --- | --- | --- | --- |
-| `POST /companies` | `address.address_line_1`, `postal_code`; inline address typed `registered` | `address.{line_1, city, region, postcode, country, type: registered_office}`; reads `id` | both spellings in, gateway's out; type kept (default `registered_office`) |
+| `POST /companies` | `address.address_line_1`, `postal_code`; inline address typed `registered` | `address.{line_1, city, region, postcode, country, type: registered_office}`; reads `id` | both spellings in and out; type kept (default `registered`, as before) |
 | `GET /companies/{id}` | `address` without an id | reads `address.id` as `registered_office_address_id` | `address` is the stored registered office, with its id |
 | `PATCH /companies/{id}` | not served | KYB fields on a re-run for an existing company; reads `id` | served |
 | `POST /companies/{id}/addresses` | `address_line_1`, `postal_code`; `id` echoed under `extra` | `{id, type, line_1, city, country, line_2?, region?, postcode?}`; reads `id` | both spellings; the client's `id` kept as the address id (422 on a repeat) |
