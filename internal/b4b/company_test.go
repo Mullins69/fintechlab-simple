@@ -15,12 +15,12 @@ func gbCompany() CompanyParams {
 		LegalName:   "Harness Merchant Ltd",
 		TradingName: "Harness",
 		CompanyType: "kyb",
-		Address: &Address{
-			AddressLine1: "1 Simulation Way",
-			City:         "London",
-			PostalCode:   "EC1A 1AA",
-			Country:      "GB",
-		},
+		Address: &AddressParams{Address: Address{
+			Line1:    "1 Simulation Way",
+			City:     "London",
+			Postcode: "EC1A 1AA",
+			Country:  "GB",
+		}},
 	}
 }
 
@@ -29,12 +29,12 @@ func TestCreateCompanyRequiresLegalNameAndAddress(t *testing.T) {
 	cases := map[string]CompanyParams{
 		"no legal name": {Address: gbCompany().Address},
 		"no address":    {LegalName: "Acme Ltd"},
-		"address with no country": {LegalName: "Acme Ltd", Address: &Address{
-			AddressLine1: "1 Simulation Way", City: "London", PostalCode: "EC1A 1AA",
-		}},
-		"three-letter country": {LegalName: "Acme Ltd", Address: &Address{
-			AddressLine1: "1 Simulation Way", City: "London", PostalCode: "EC1A 1AA", Country: "GBR",
-		}},
+		"address with no country": {LegalName: "Acme Ltd", Address: &AddressParams{Address: Address{
+			Line1: "1 Simulation Way", City: "London", Postcode: "EC1A 1AA",
+		}}},
+		"three-letter country": {LegalName: "Acme Ltd", Address: &AddressParams{Address: Address{
+			Line1: "1 Simulation Way", City: "London", Postcode: "EC1A 1AA", Country: "GBR",
+		}}},
 		"five-digit mcc": func() CompanyParams {
 			p := gbCompany()
 			p.MerchantCategoryCode = "59999"
@@ -82,8 +82,11 @@ func TestCreateCompanyMaterializesRegisteredOffice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("addresses: %v", err)
 	}
-	if len(addrs) != 1 || addrs[0].Type != "registered" || addrs[0].City != "London" {
-		t.Fatalf("addresses = %+v, want one registered London address", addrs)
+	if len(addrs) != 1 || addrs[0].Type != RegisteredOffice || addrs[0].City != "London" {
+		t.Fatalf("addresses = %+v, want one registered_office London address", addrs)
+	}
+	if c.Address == nil || c.Address.ID != addrs[0].ID {
+		t.Fatalf("the company's address %+v should carry the stored address's id %s", c.Address, addrs[0].ID)
 	}
 }
 
@@ -226,20 +229,18 @@ func TestExtendedProfileDocumentRules(t *testing.T) {
 	if _, err := d.CreateExtended(c.ID, ExtendedParams{RegisteredCompanyNo: "12345678"}); !errors.Is(err, ErrRequirementUnmet) {
 		t.Fatalf("unwaived profile with no documents: err = %v, want ErrRequirementUnmet", err)
 	}
-	if _, err := d.CreateExtended(c.ID, ExtendedParams{Documents: []string{"doc_x"}}); !errors.Is(err, ErrInvalid) {
-		t.Fatalf("profile with no registered_company_no: err = %v, want ErrInvalid", err)
-	}
 	// A document id nobody uploaded is a caller error, not a silent
 	// dangling reference: the two-step upload flow only means anything if
 	// the second step checks the first happened.
-	_, err := d.CreateExtended(c.ID, ExtendedParams{RegisteredCompanyNo: "12345678", Documents: []string{"doc_never"}})
+	_, err := d.CreateExtended(c.ID, ExtendedParams{RegisteredCompanyNo: "12345678", Documents: []ExtendedDocument{{Document: "doc_never"}}})
 	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "doc_never") {
 		t.Fatalf("unknown document id: err = %v, want ErrInvalid naming doc_never", err)
 	}
 
 	doc := d.AddDocument(DocumentParams{DocumentType: "business_registry_extract", FileName: "extract.pdf", Size: 12})
-	if _, err := d.CreateExtended(c.ID, ExtendedParams{RegisteredCompanyNo: "12345678", Documents: []string{doc.ID}}); err != nil {
-		t.Fatalf("profile with an uploaded document: %v", err)
+	// registered_company_no is optional, as the gateway's client has it.
+	if _, err := d.CreateExtended(c.ID, ExtendedParams{Documents: []ExtendedDocument{{Document: doc.ID}}}); err != nil {
+		t.Fatalf("profile with an uploaded document and no registered_company_no: %v", err)
 	}
 }
 
@@ -285,7 +286,7 @@ func TestDirectoryOnChangeFiresForEveryMutation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
-	if _, err := d.AddAddress(c.ID, AddressParams{Type: "trading", Address: *gbCompany().Address}); err != nil {
+	if _, err := d.AddAddress(c.ID, AddressParams{Type: "trading", Address: gbCompany().Address.Address}); err != nil {
 		t.Fatalf("add address: %v", err)
 	}
 	d.AddDocument(DocumentParams{FileName: "x.pdf"})
@@ -308,7 +309,7 @@ func TestDirectoryOnChangeFiresForEveryMutation(t *testing.T) {
 
 func TestUnknownCompanyIsNotFoundEverywhere(t *testing.T) {
 	d := NewDirectory(nil)
-	if _, err := d.AddAddress("cmp_nope", AddressParams{Type: "trading", Address: *gbCompany().Address}); !errors.Is(err, ErrNotFound) {
+	if _, err := d.AddAddress("cmp_nope", AddressParams{Type: "trading", Address: gbCompany().Address.Address}); !errors.Is(err, ErrNotFound) {
 		t.Errorf("AddAddress err = %v, want ErrNotFound", err)
 	}
 	if _, err := d.AddPerson("cmp_nope", PersonParams{FirstName: "A", LastName: "B", DateOfBirth: "2000-01-01"}); !errors.Is(err, ErrNotFound) {
@@ -339,5 +340,29 @@ func TestRecordsAreStampedOnTheRunnersClock(t *testing.T) {
 	}
 	if got, want := c.CreatedAt[:10], labclock.Now().Format("2006-01-02"); got != want {
 		t.Errorf("createdAt %s, want the runner's day %s", c.CreatedAt, want)
+	}
+}
+
+// The lab's first address spellings still board a company, and are answered
+// in the gateway's: a body written against the old names keeps working,
+// and no answer carries two names for one field.
+func TestAddressTakesTheEarlierSpellingsAndAnswersTheGateways(t *testing.T) {
+	d := NewDirectory(nil)
+	p := gbCompany()
+	p.Address = &AddressParams{Address: Address{AddressLine1: "1 Old Way", AddressLine2: "Unit 2", PostalCode: "EC1A 1AA", City: "London", Country: "GB"}}
+	c, err := d.CreateCompany(p)
+	if err != nil {
+		t.Fatalf("create with address_line_1/postal_code: %v", err)
+	}
+	got := c.Address.Address
+	if got.Line1 != "1 Old Way" || got.Line2 != "Unit 2" || got.Postcode != "EC1A 1AA" {
+		t.Fatalf("address = %+v, want the earlier spellings folded into line_1, line_2, postcode", got)
+	}
+	if got.AddressLine1 != "" || got.AddressLine2 != "" || got.PostalCode != "" {
+		t.Fatalf("address = %+v still carries the earlier spellings", got)
+	}
+	both := Address{Line1: "gateway", AddressLine1: "lab", City: "London", Country: "GB"}.normalized()
+	if both.Line1 != "gateway" {
+		t.Fatalf("with both spellings sent, line_1 = %q, want the gateway's", both.Line1)
 	}
 }
