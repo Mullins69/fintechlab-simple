@@ -134,15 +134,23 @@ func (d *Directory) Restore(s State) {
 	defer d.mu.Unlock()
 	for _, c := range s.Companies {
 		c.Env = owner(c.Env)
+		if c.Address != nil {
+			c.Address.Address = c.Address.Address.normalized()
+		}
 		d.companies[c.ID] = c
 		if c.ExternalRef != "" {
 			d.companiesByRef[refKey(c.Env, c.ExternalRef)] = c
 		}
 	}
 	for _, a := range s.Addresses {
+		a.Address = a.Address.normalized()
 		d.addresses[a.CompanyID] = append(d.addresses[a.CompanyID], a)
 	}
 	for _, p := range s.People {
+		if p.Address != nil {
+			normalized := p.Address.normalized()
+			p.Address = &normalized
+		}
 		d.people[p.ID] = p
 		d.peopleByCompany[p.CompanyID] = append(d.peopleByCompany[p.CompanyID], p.ID)
 	}

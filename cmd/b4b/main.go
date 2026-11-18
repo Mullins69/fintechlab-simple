@@ -251,6 +251,7 @@ func (a *app) routes(ctl http.Handler) *http.ServeMux {
 	mux.HandleFunc("POST /oversight/v1/companies", a.requireAuth(a.createCompany))
 	mux.HandleFunc("GET /oversight/v1/companies", a.requireAuth(a.listCompanies))
 	mux.HandleFunc("GET /oversight/v1/companies/{id}", a.requireAuth(a.getCompany))
+	mux.HandleFunc("PATCH /oversight/v1/companies/{id}", a.requireAuth(a.updateCompany))
 	mux.HandleFunc("POST /oversight/v1/companies/{id}/addresses", a.requireAuth(a.createAddress))
 	mux.HandleFunc("GET /oversight/v1/companies/{id}/addresses", a.requireAuth(a.listAddresses))
 	mux.HandleFunc("POST /oversight/v1/companies/{id}/people", a.requireAuth(a.createPerson))
@@ -267,6 +268,12 @@ func (a *app) routes(ctl http.Handler) *http.ServeMux {
 	mux.HandleFunc("GET /oversight/v1/companies/{id}/vibans", a.requireAuth(a.listVibans))
 	mux.HandleFunc("POST /oversight/v1/uploads", a.requireAuth(a.uploadDocument))
 	mux.HandleFunc("GET /oversight/v1/uploads/{id}", a.requireAuth(a.getDocument))
+	// The gateway's two-step upload: a slot for one company, then the bytes
+	// PUT to the slot's presigned URL. The PUT carries no bearer token --
+	// the secret in its path is the credential, as a presigned URL's
+	// signature is.
+	mux.HandleFunc("POST /oversight/v1/companies/{id}/uploads", a.requireAuth(a.createUploadSlot))
+	mux.HandleFunc("PUT /direct-uploads/{token}", a.receiveUpload) // uploadPath
 
 	// Payout.
 	mux.HandleFunc("POST /oversight/v1/beneficiaries", a.requireAuth(a.registerBeneficiary))

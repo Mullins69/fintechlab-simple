@@ -118,7 +118,7 @@ func board(t *testing.T, a *app) {
 	c, err := a.dir.CreateCompany(b4b.CompanyParams{
 		ExternalRef: "mer_0001", LegalName: "Harness Merchant Ltd", CompanyType: "kyb",
 		CompanyDocumentsWaived: true, PersonDocumentsWaived: true,
-		Address: &b4b.Address{AddressLine1: "1 Simulation Way", City: "London", PostalCode: "EC1A 1AA", Country: "GB"},
+		Address: &b4b.AddressParams{Address: b4b.Address{Line1: "1 Simulation Way", City: "London", Postcode: "EC1A 1AA", Country: "GB"}},
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -80,6 +80,22 @@ What a platform's B4B client calls, under `/oversight/v1`, in the order a
 boarding chain walks it: company, addresses, people, extended profile,
 vIBANs, uploads, then beneficiaries and payments.
 
+**Where the boarding shapes come from.** The boarding routes accept, and
+answer with the fields read by, the platform gateway's B4B client (buddy,
+`apps/gateway/src/modules/b4b/` and the chain in
+`apps/gateway/src/modules/lifecycle/orchestrators/lifecycle.orchestrator.ts`,
+`runB4bBoardingChainForApplication`). That client is the one run against
+the real vendor, so where it and this lab's earlier reading of the vendor
+docs disagreed, the lab changed. The lab's earlier field names are still
+accepted on the way in (marked *earlier spelling* below), so its own e2e
+suite and older bodies keep working. The gateway walks: `POST /companies`
+(or `PATCH /companies/{id}` for a company it already boarded),
+`POST /companies/{id}/addresses` per outlet and owner, `POST
+/companies/{id}/people` per owner, `GET /companies/{id}`, the upload slots
+for any documents, `POST /companies/{id}/extended`, then `POST
+/beneficiaries` per outlet. A UK company whose owners have no documents on
+file uploads nothing.
+
 Bodies are read leniently: a field this mock has no column for is not
 refused. On the boarding records (company, address, person, extended
 profile) it is kept and echoed back under `extra`; on beneficiaries,
@@ -153,40 +169,47 @@ else. The exact reason is on b4b's stdout, for example
 
 Boards a company. The registered office is supplied inline.
 
-Body:
+Body, as the gateway sends it:
 
 ```json
 {
-  "external_ref": "merchant-0001",
+  "external_ref": "IP000123",
   "legal_name": "Southwind Coffee Ltd",
-  "trading_name": "Southwind Coffee",
   "company_type": "kyb",
   "acquirer": "Worldline",
   "primary_channel": "Infinite Payments",
   "merchant_category_code": "5814",
-  "company_documents_waived": false,
-  "person_documents_waived": false,
-  "address": {"address_line_1": "1 Simulation Way", "city": "London", "postal_code": "EC1A 1AA", "country": "GB"}
+  "company_documents_waived": true,
+  "person_documents_waived": true,
+  "address": {"line_1": "1 Simulation Way", "city": "London", "region": "", "postcode": "EC1A 1AA", "country": "GB", "type": "registered_office"}
 }
 ```
 
-`legal_name` and `address` are required; the address needs
-`address_line_1`, `city` and a two-letter `country` (`address_line_2`,
-`region`, `postal_code` optional). `merchant_category_code`, when present,
-must be four digits. The two waiver flags switch off the document
-requirements on the extended profile and on natural persons.
+`trading_name` is accepted too. `legal_name` and `address` are required;
+the address needs `line_1`, `city` and a two-letter `country` (`line_2`,
+`line_3`, `region`, `postcode` optional; `type` defaults to
+`registered_office`; an `id` is kept as the address's id). Earlier
+spellings, still accepted: `address_line_1`, `address_line_2`,
+`postal_code`; a value under the gateway's name wins. `merchant_category_code`,
+when present, must be four digits. The two waiver flags switch off the
+document requirements on the extended profile and on natural persons.
 
-Answers `201` with the company:
+Answers `201` with the company. Its `address` is the registered office as
+stored, with the id a client names as the extended profile's
+`registered_office_address_id`:
 
 ```json
 {
   "id": "cmp_3f9a1c2b7d4e",
-  "external_ref": "merchant-0001",
+  "external_ref": "IP000123",
   "legal_name": "Southwind Coffee Ltd",
+  "company_type": "kyb",
+  "acquirer": "Worldline",
+  "primary_channel": "Infinite Payments",
   "merchant_category_code": "5814",
-  "company_documents_waived": false,
-  "person_documents_waived": false,
-  "address": {"address_line_1": "1 Simulation Way", "city": "London", "postal_code": "EC1A 1AA", "country": "GB"},
+  "company_documents_waived": true,
+  "person_documents_waived": true,
+  "address": {"id": "adr_9c1d2e3f4a5b", "company_id": "cmp_3f9a1c2b7d4e", "type": "registered_office", "line_1": "1 Simulation Way", "city": "London", "region": "", "postcode": "EC1A 1AA", "country": "GB", "created_at": "2026-11-07T09:30:00Z"},
   "status": "active",
   "sanctions_status": "pass",
   "created_at": "2026-11-07T09:30:00Z",
@@ -194,12 +217,15 @@ Answers `201` with the company:
 }
 ```
 
+The gateway reads `id` (and logs `address.type`). Addresses are always
+answered in the gateway's names, whichever spelling came in.
+
 - `400`: a missing or invalid field (`b4b: invalid input: legal_name is required`).
 - `422`: the `external_ref` is already taken in the caller's environment
-  (`b4b: already exists: a company with external_ref "merchant-0001" already exists (id cmp_…)`).
+  (`b4b: already exists: a company with external_ref "IP000123" already exists (id cmp_…)`).
 
-Side effects: the inline address is also stored as an address of type
-`registered`, so `GET …/addresses` lists it. Persisted. No callback.
+Side effects: the inline address is also stored as one of the company's
+addresses, so `GET …/addresses` lists it. Persisted. No callback.
 
 ### `GET /oversight/v1/companies`
 
@@ -211,29 +237,72 @@ Answers `200` with `{"companies": [<company>, …]}`.
 
 ### `GET /oversight/v1/companies/{id}`
 
-One company, by B4B id or by `external_ref`.
+One company, by B4B id or by `external_ref`. The gateway reads
+`address.id` here, for the extended profile's
+`registered_office_address_id`.
 
 Answers `200` with the company, `404` for an unknown id.
+
+### `PATCH /oversight/v1/companies/{id}`
+
+Changes the fields sent and keeps the rest. The gateway sends it when its
+chain re-runs for a company it already boarded, instead of creating it
+again:
+
+```json
+{
+  "external_ref": "IP000123",
+  "legal_name": "Southwind Coffee Ltd",
+  "company_type": "kyb",
+  "acquirer": "Worldline",
+  "primary_channel": "Infinite Payments",
+  "merchant_category_code": "5814",
+  "company_documents_waived": true,
+  "person_documents_waived": true
+}
+```
+
+Every field of the create is accepted, each optional; a `null` leaves the
+field alone. `address` changes the registered office field by field (the
+fields sent replace, the rest stay, its id does not change). The create's
+rules apply to what is sent: a blank `legal_name` or a non-four-digit
+`merchant_category_code` is `400`.
+
+Answers `200` with the company (the gateway reads `id`, `external_ref`,
+`legal_name`). `404` for an unknown company; `422` when the new
+`external_ref` is another company's in the caller's environment.
+Persisted.
 
 ### `POST /oversight/v1/companies/{id}/addresses`
 
 Registers another address against a company. The address fields sit at the
-top level, next to `type`:
+top level, next to `type`. As the gateway sends it, one per outlet
+(`trading`) and one per owner (`ubo`):
 
 ```json
-{"type": "trading", "address_line_1": "2 High Street", "city": "Leeds", "postal_code": "LS1 1AA", "country": "GB"}
+{"id": "5d0f0c55-1b8a-5f1e-9a51-3e3c0b1f6a21", "type": "trading", "line_1": "2 High Street", "city": "Leeds", "country": "GB", "postcode": "LS1 1AA"}
 ```
 
-`type` is required (the comment names `registered`, `trading`, `operating`;
-any non-empty value is accepted). Address rules as on the company.
+`type` is required (the gateway's values are `registered_office`,
+`business`, `trading`, `cardholder` and `ubo`; any non-empty value is
+accepted). `id` is optional: the gateway sends its own (a UUIDv5 of the
+record the address came from), and it is kept as the address's id, so the
+answer carries it back; without one b4b mints `adr_…`. Address rules and
+earlier spellings as on the company.
 
 Answers `201`:
 
 ```json
-{"id": "adr_9c1d2e3f4a5b", "company_id": "cmp_3f9a1c2b7d4e", "type": "trading", "address_line_1": "2 High Street", "city": "Leeds", "postal_code": "LS1 1AA", "country": "GB", "created_at": "2026-11-07T09:31:00Z"}
+{"id": "5d0f0c55-1b8a-5f1e-9a51-3e3c0b1f6a21", "company_id": "cmp_3f9a1c2b7d4e", "type": "trading", "line_1": "2 High Street", "city": "Leeds", "region": "", "postcode": "LS1 1AA", "country": "GB", "created_at": "2026-11-07T09:31:00Z"}
 ```
 
-`400` for a missing field, `404` for an unknown company.
+The gateway reads `id`: an owner's becomes that person's `address_id`, the
+first outlet's the extended profile's `business_address_id`.
+
+`400` for a missing field, `404` for an unknown company, `422` for an `id`
+the company already has an address under. Whether the real vendor keeps
+the client's id or mints its own is not confirmed; the gateway works
+either way, since it stores the id answered.
 
 ### `GET /oversight/v1/companies/{id}/addresses`
 
@@ -243,29 +312,43 @@ included. `404` for an unknown company.
 ### `POST /oversight/v1/companies/{id}/people`
 
 Attaches a natural person or a shareholding company. Both go through this
-endpoint, told apart by `entity_type`.
+endpoint, told apart by `type`.
 
-Body, natural person (the default when `entity_type` is empty):
+Body, a natural person as the gateway sends it (an owner with no identity
+document on file, on a company with `person_documents_waived`):
 
 ```json
 {
-  "entity_type": "natural_person",
+  "external_ref": "42",
+  "type": "natural_person",
+  "role": "shareholder",
+  "callback_url": "https://gateway.example/api/v1/b4b/callback/sanctions",
   "first_name": "Ada",
   "last_name": "Lovelace",
-  "date_of_birth": "1815-12-10",
-  "nationality": "GB",
-  "roles": ["director", "ubo"],
-  "ownership_percentage": "51",
-  "is_pep": false,
-  "document_type": "passport",
-  "document_number": "P1234567",
-  "document_country": "GB"
+  "email": "ada@southwind.example",
+  "positions_within_business": ["DIRECTOR"],
+  "telephone_number": "+447700900123",
+  "date_of_birth": "1985-12-10",
+  "countries_of_citizenship": ["GB"],
+  "address_id": "9b2e6f1a-7c3d-5e4f-8a9b-0c1d2e3f4a5b"
 }
 ```
 
-Also accepted: `middle_name`, `email`, `phone`, `address` (address object),
-`external_ref`. A legal entity needs `"entity_type": "legal_entity"` and
-`legal_name`, optionally `registered_company_no`.
+With a document on file the gateway adds `document_type`
+(`passport`, `identity_card`, `driving_license`, `residence_permit`),
+`document_number` and `document_country`. A legal entity is
+`{"external_ref", "type": "legal_entity", "role": "shareholder", "callback_url", "name", "address_id"}`.
+
+Field by field: `type` is the entity type (default `natural_person`;
+earlier spelling `entity_type`); `name` is a legal entity's name (earlier
+spelling `legal_name`, optionally with `registered_company_no`); `role`
+(`key_individual` or `shareholder`), `positions_within_business`,
+`telephone_number` and `countries_of_citizenship` are kept as sent.
+`address_id` must name one of the company's addresses. `callback_url` is
+where this person's screening callback goes, and must pass the allowlist
+like a beneficiary's. Also accepted from the lab's earlier shape:
+`middle_name`, `phone`, `nationality`, `roles`, `ownership_percentage`,
+`is_pep` and an inline `address` object.
 
 Rules: a natural person needs `first_name`, `last_name` and
 `date_of_birth` (400 otherwise), and `document_type`, `document_number` and
@@ -273,13 +356,21 @@ Rules: a natural person needs `first_name`, `last_name` and
 `person_documents_waived` (422 otherwise). `external_ref` is echoed but is
 not a lookup key, and b4b logs a warning when one is sent.
 
-Answers `201` with the person, both screening statuses `pass`:
+Answers `201` with the person, both screening statuses `pass`. The gateway
+reads `id`, `external_ref` and `sanctions_status` (an inline `pass` counts
+as screened; it upper-cases the value, and anything it does not recognise
+would put the merchant on hold as `REVIEW`):
 
 ```json
-{"id": "per_5a6b7c8d9e0f", "company_id": "cmp_3f9a1c2b7d4e", "entity_type": "natural_person", "first_name": "Ada", "last_name": "Lovelace", "date_of_birth": "1815-12-10", "roles": ["director", "ubo"], "is_pep": false, "document_type": "passport", "document_number": "P1234567", "document_country": "GB", "sanctions_status": "pass", "pep_sanctions_status": "pass", "created_at": "2026-11-07T09:32:00Z", "updated_at": "2026-11-07T09:32:00Z"}
+{"id": "per_5a6b7c8d9e0f", "company_id": "cmp_3f9a1c2b7d4e", "external_ref": "42", "entity_type": "natural_person", "first_name": "Ada", "last_name": "Lovelace", "date_of_birth": "1985-12-10", "email": "ada@southwind.example", "telephone_number": "+447700900123", "positions_within_business": ["DIRECTOR"], "countries_of_citizenship": ["GB"], "role": "shareholder", "is_pep": false, "address_id": "9b2e6f1a-7c3d-5e4f-8a9b-0c1d2e3f4a5b", "callback_url": "https://gateway.example/api/v1/b4b/callback/sanctions", "sanctions_status": "pass", "pep_sanctions_status": "pass", "created_at": "2026-11-07T09:32:00Z", "updated_at": "2026-11-07T09:32:00Z"}
 ```
 
-- `400`: missing name or date of birth, unknown `entity_type`.
+The entity type and a legal entity's name are answered as `entity_type`
+and `legal_name`, whichever spelling came in.
+
+- `400`: missing name or date of birth, unknown type, an `address_id`
+  that is not one of the company's addresses, or
+  `callback_url rejected: allowlist: …`.
 - `404`: unknown company.
 - `422`: identity document missing on an unwaived company.
 
@@ -302,31 +393,58 @@ Answers `200` with the person, `404` for an unknown `personID`.
 
 Creates the company's regulatory profile, once ever. There is no update.
 
-Body:
+Body, as the gateway sends it for a UK private limited company whose
+director is its one owner:
 
 ```json
 {
+  "company_type": "limited",
   "registered_company_no": "12345678",
-  "nace_codes": ["6201"],
-  "documents": ["doc_1a2b3c4d5e6f"],
-  "incorporation_date": "2019-04-01",
-  "legal_form": "private_limited_company",
-  "website": "https://southwind.example",
-  "financial": {},
-  "payments": {}
+  "registered_office_address_id": "adr_9c1d2e3f4a5b",
+  "business_address_id": "5d0f0c55-1b8a-5f1e-9a51-3e3c0b1f6a21",
+  "tax_numbers": ["GB123456789"],
+  "company_website": "https://southwind.example",
+  "business_activities": "Coffee shop",
+  "vat_number": "GB123456789",
+  "compliance": {"risk_category": "low"},
+  "ownership_structure": {
+    "shareholders": [{"person_id": "per_5a6b7c8d9e0f", "share_percentage": 100, "nominee": false}],
+    "key_individuals": [{"person_id": "per_5a6b7c8d9e0f", "share_percentage": 100, "roles": ["director", "ubo", "authorised_representative"]}]
+  },
+  "documents": [{"type": "business_registry_extract", "document": "doc_1a2b3c4d5e6f"}]
 }
 ```
 
-`registered_company_no` is required. `documents` holds upload ids from
-`POST /oversight/v1/uploads` and is required unless the company has
-`company_documents_waived`. `nace_codes` is not enforced; its absence is
-logged, because the vendor's guide and schema disagree.
+The gateway sends `documents` only when it uploaded some, and `nace_codes`
+is optional on its side. Each `documents` entry is either the gateway's
+`{"type", "document"}` or, the lab's earlier shape, a bare upload id
+(`"documents": ["doc_1a2b3c4d5e6f"]`); each is answered in the form it came
+in. Also accepted from the earlier shape: `nace_codes`,
+`incorporation_date`, `legal_form`, `website`, `financial`, `payments`.
 
-Answers `201` with the profile (`id` `ext_…`, `company_id`, the fields
-above, `created_at`).
+Rules:
 
-- `400`: `registered_company_no` missing, or a document id that was never
-  uploaded (`b4b: invalid input: documents doc_x were never uploaded; POST /oversight/v1/uploads first`).
+- `documents` is required unless the company has
+  `company_documents_waived` (422). Every entry must name an upload of the
+  caller's environment, and an upload slot must have had its bytes PUT
+  (400 otherwise: the gateway's client notes the vendor refuses a signed id
+  with no file behind it).
+- `registered_office_address_id` and `business_address_id` must be
+  addresses of this company, and every `ownership_structure` `person_id`
+  one of its people (400).
+- `registered_company_no` is optional (it was required here before; the
+  gateway's client, whose required markers were checked against the
+  vendor's spec, has it optional). `company_type` is not refused when
+  absent, although the gateway calls it required. `nace_codes` is not
+  enforced; its absence is logged, because the vendor's guide and schema
+  disagree.
+
+Answers `201` with the profile: `id` (`ext_…`), `company_id`, the fields
+above, `created_at`. The gateway's response type names `id`,
+`company_type`, `registered_company_no`, `vat_number` and
+`company_website`; it reads none of them back.
+
+- `400`: a document, address or person id as above.
 - `404`: unknown company.
 - `422`: a profile already exists (checked before any body field is
   validated), naming it: `… already has an extended profile (id ext_…); it can only be created once and there is no update endpoint`;
@@ -397,43 +515,93 @@ persisted.
 ### `GET /oversight/v1/uploads/{id}`
 
 Answers `200` with the receipt (never the file, there is none), `404` for
-an unknown id.
+an unknown id. A slot's receipt also carries `company_id`, `checksum` and,
+until its bytes arrive, `"awaiting_bytes": true`.
+
+### `POST /oversight/v1/companies/{id}/uploads`
+
+The gateway's upload: a slot for one of the company's documents, whose
+bytes are then PUT to the slot's URL. Body, as the gateway builds it from
+the file:
+
+```json
+{"filename": "extract.pdf", "byte_size": 20481, "checksum": "1B2M2Y8AsgTpgAmY7PhCfg==", "content_type": "application/pdf"}
+```
+
+All four are required. `checksum` is the base64 MD5 of the bytes (the
+gateway's client notes the vendor validates base64, not hex), and
+`byte_size` must be positive and at most 32 MiB.
+
+Answers `201` with the slot, which is all the gateway reads:
+
+```json
+{"id": "doc_1a2b3c4d5e6f", "url": "http://127.0.0.1:8086/direct-uploads/4f1c…", "headers": {"Content-Type": "application/pdf", "Content-MD5": "1B2M2Y8AsgTpgAmY7PhCfg=="}}
+```
+
+`id` is what the extended profile names as a document. `url` is this
+listener as the caller reached it (`X-Forwarded-Proto` and
+`X-Forwarded-Host` are honoured), so it is reachable from wherever the
+create was. `400` for a missing or malformed field, `404` for an unknown
+company. Persisted, so a slot survives a restart.
+
+### `PUT /direct-uploads/{token}`
+
+The slot's presigned URL. No bearer token: the secret in the path is the
+credential, as a presigned URL's signature is. The body is the file's
+bytes, sent with the slot's headers.
+
+Answers `200` with an **empty body**, the only answer the gateway takes as
+a successful upload. The bytes must be exactly `byte_size` long and hash
+to `checksum` (`400` otherwise, as storage answers a bad digest); a URL no
+slot has is `403`, which the gateway reads as a slot gone stale. A second
+PUT of the same bytes is accepted again. The bytes are measured, hashed
+and discarded, as on `POST /oversight/v1/uploads`. Slots do not expire
+here.
 
 ### `POST /oversight/v1/beneficiaries`
 
 Registers a payee.
 
-Body:
+Body, as the gateway sends it for an outlet with a GB business account
+(the account number, and the sort code as `SC<digits>`):
 
 ```json
 {
   "company_id": "cmp_3f9a1c2b7d4e",
-  "external_ref": "MID0001",
+  "external_ref": "beneficiary-outlet-7",
   "account_name": "Southwind Coffee Ltd",
-  "account_number": "GB00SIM0000000000042",
+  "beneficiary_type": "legal_entity",
+  "account_number": "12345678",
   "financial_institution": "SC112233",
-  "country": "GB",
-  "callback_url": "http://settlement:8083/internal/b4b-webhook",
-  "sanctions_status": "pass"
+  "callback_url": "https://gateway.example/api/v1/b4b/callback/sanctions"
 }
 ```
 
+Also accepted: `country`, and `sanctions_status` (below). The lab's
+settlement stand-in and e2e suite send no `beneficiary_type`.
+
 `account_name`, `account_number` and `financial_institution` are required.
+`beneficiary_type`, when present, must be `natural_person` or
+`legal_entity`, and is kept and answered.
 `company_id` is optional and, when present, must name a boarded company (id
-or `external_ref`). Two lab affordances that are not real wire fields:
-`callback_url` (overrides the environment's callback endpoint for this
-payee; must pass `WEBHOOK_ALLOWLIST` or the environment's `webhook_hosts`)
-and `sanctions_status` (`pass`, the default, `review`
-or `fail`, to register a payee that is already blocked).
+or `external_ref`). `callback_url` overrides the environment's callback
+endpoint for this payee and must pass `WEBHOOK_ALLOWLIST` or the
+environment's `webhook_hosts`; the lab's reading of the vendor docs had it
+as a lab affordance, but the gateway sends it on every payee (see the
+design record). `sanctions_status` is a lab affordance, not a real wire
+field: `pass`, the default, `review` or `fail`, to register a payee that is
+already blocked.
 
 Answers `201`:
 
 ```json
-{"id": "ben_0a1b2c3d4e5f", "company_id": "cmp_3f9a1c2b7d4e", "external_ref": "MID0001", "account_name": "Southwind Coffee Ltd", "account_number": "GB00SIM0000000000042", "financial_institution": "SC112233", "country": "GB", "status": "active", "sanctions_status": "pass", "callback_url": "http://settlement:8083/internal/b4b-webhook"}
+{"id": "ben_0a1b2c3d4e5f", "company_id": "cmp_3f9a1c2b7d4e", "external_ref": "beneficiary-outlet-7", "account_name": "Southwind Coffee Ltd", "account_number": "12345678", "financial_institution": "SC112233", "beneficiary_type": "legal_entity", "status": "active", "sanctions_status": "pass", "callback_url": "https://gateway.example/api/v1/b4b/callback/sanctions"}
 ```
 
+The gateway reads `id` and `external_ref`.
+
 - `400`: a required field missing (`account_name is required`), an invalid
-  `sanctions_status`, or `callback_url rejected: allowlist: …`.
+  `sanctions_status` or `beneficiary_type`, or `callback_url rejected: allowlist: …`.
 - `404`: `company_id` names a company that was never boarded.
 
 Side effects: fires the [beneficiary callback](#beneficiary-callback) in
@@ -565,7 +733,8 @@ POSTing to it. Common to all three kinds (`deliverCallback`):
   signature, no HMAC, no encryption, no auth header. The response body is
   ignored; any 2xx counts as taken. 8-second client timeout.
 - **Destination.** The record's own `callback_url` if it has one
-  (beneficiaries and payments only, a lab affordance), otherwise the
+  (people, beneficiaries and payments; the gateway sends one on every
+  person and beneficiary), otherwise the
   environment's client-account endpoint, the one the real API uses:
   `B4B_CALLBACK_URL` for the default, the customer's `b4b.callback_url` for
   any other ([Environments](#environments)). A payment's destination is
@@ -589,15 +758,21 @@ The lab's settlement stand-in receives payment callbacks at
 
 Sent after every `POST /oversight/v1/companies/{id}/people` (both entity
 types), and after `PUT /sim/people/{id}/sanctions` when either status
-actually changed. Always to the environment's client-account endpoint
-(`B4B_CALLBACK_URL` for the default): a person has no `callback_url`.
+actually changed. To the person's `callback_url` if the create carried one,
+else the environment's client-account endpoint (`B4B_CALLBACK_URL` for the
+default).
 
 ```json
 {"id": "per_5a6b7c8d9e0f", "sanctions_status": "pass", "pep_sanctions_status": "pass"}
 ```
 
 Nothing else: no `external_ref`, no `entity_type`, no `company_id`. A client
-correlates on the id the create returned.
+correlates on the id the create returned. The gateway's callback schema
+(`callback/dto/b4b-callback.dto.ts`) takes `{id, sanctions_status:
+pass|fail|review, external_ref?}` as a plain `z.object`, which strips an
+undeclared key rather than refusing it: `pep_sanctions_status` arrives and
+is ignored, so a PEP hit with a clean sanctions status does not hold the
+merchant there.
 
 #### Beneficiary callback
 
@@ -612,7 +787,9 @@ the environment's endpoint.
 
 `external_ref` and `disabled_at` are omitted when empty. This is the
 superset of two readings of the vendor's documentation; see the design
-record.
+record. The gateway's schema (above) takes it: it reads `id` and
+`sanctions_status`, and strips `status` and `disabled_at` -- so a payee
+disabled while screening clean does not reach it as a change.
 
 #### Payment lifecycle callback
 
