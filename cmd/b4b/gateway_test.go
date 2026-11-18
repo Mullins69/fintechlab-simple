@@ -333,7 +333,9 @@ func TestTheGatewaysReferencesMustNameThisCompanysRecords(t *testing.T) {
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",
 		fill(gatewayPerson, map[string]string{"callback_url": lab.callback}), 400) // no such address yet
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses", gatewayOwnerAddress, 201)
-	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses", gatewayOwnerAddress, 422) // same id again
+	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses", gatewayOwnerAddress, 201) // a retry: the stored address
+	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses",
+		strings.Replace(gatewayOwnerAddress, "3 Home Road", "4 Home Road", 1), 422) // another address under the same id
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",
 		fill(gatewayPerson, map[string]string{"callback_url": "http://elsewhere.example" + gatewayCallbackPath}), 400)
 	personID := lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",

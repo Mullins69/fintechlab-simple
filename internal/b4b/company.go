@@ -58,9 +58,9 @@ type Address struct {
 	Country  string `json:"country"`
 
 	// The lab's earlier spellings, accepted on input and answered beside the gateway's.
-	AddressLine1 string `json:"address_line_1,omitempty"`
+	AddressLine1 string `json:"address_line_1"`
 	AddressLine2 string `json:"address_line_2,omitempty"`
-	PostalCode   string `json:"postal_code,omitempty"`
+	PostalCode   string `json:"postal_code"`
 }
 
 // normalized is a with the earlier spellings folded into the gateway's (a
