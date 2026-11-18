@@ -301,7 +301,9 @@ The gateway reads `id`: an owner's becomes that person's `address_id`, the
 first outlet's the extended profile's `business_address_id`.
 
 `400` for a missing field, `404` for an unknown company, `422` for an `id`
-the company already has an address under. Whether the real vendor keeps
+the company already has another address under. The same body sent again,
+as a client retrying a create whose answer it lost would, is answered with
+the stored address. Whether the real vendor keeps
 the client's id or mints its own is not confirmed; the gateway works
 either way, since it stores the id answered.
 

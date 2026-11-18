@@ -238,7 +238,7 @@ func (d *Directory) UpdateCompany(id string, p CompanyPatch) (*Company, error) {
 	}
 	if p.Address != nil && c.Address != nil {
 		office := *c.Address
-		office.Address = patchAddress(office.Address, p.Address.normalized())
+		office.Address = patchAddress(office.Address, p.Address.normalized()).normalized()
 		if err := office.Address.Validate(); err != nil {
 			d.mu.Unlock()
 			return nil, err
@@ -310,12 +310,18 @@ func (d *directory) replaceAddressLocked(a CompanyAddress) {
 // addressLocked reports whether the company cid has an address with id.
 // Callers hold d.mu.
 func (d *directory) addressLocked(cid, id string) bool {
+	return d.findAddressLocked(cid, id) != nil
+}
+
+// findAddressLocked is the company cid's address with id, or nil.
+// Callers hold d.mu.
+func (d *directory) findAddressLocked(cid, id string) *CompanyAddress {
 	for _, a := range d.addresses[cid] {
 		if a.ID == id {
-			return true
+			return a
 		}
 	}
-	return false
+	return nil
 }
 
 // Company returns one company by B4B's own id or by the caller's
@@ -378,7 +384,15 @@ func (d *Directory) AddAddress(companyID string, p AddressParams) (*CompanyAddre
 		d.mu.Unlock()
 		return nil, fmt.Errorf("%w: company %q", ErrNotFound, companyID)
 	}
-	if p.ID != "" && d.addressLocked(c.ID, p.ID) {
+	if existing := d.findAddressLocked(c.ID, p.ID); p.ID != "" && existing != nil {
+		// A client retrying a create whose answer it lost sends the same body
+		// again: that gets the stored address, anything else under the id is
+		// refused.
+		if existing.Type == p.Type && existing.Address == p.Address.normalized() {
+			cp := *existing
+			d.mu.Unlock()
+			return &cp, nil
+		}
 		d.mu.Unlock()
 		return nil, fmt.Errorf("%w: company %s already has an address with id %q", ErrDuplicate, c.ID, p.ID)
 	}
