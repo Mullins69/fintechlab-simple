@@ -3,8 +3,10 @@ package main
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -597,4 +599,133 @@ func TestANumericReviewIDComesBackWithEveryDigit(t *testing.T) {
 	if result["referenceId"] != "9007199254740993" || result["statusCode"] != float64(200) {
 		t.Errorf("a numeric qrCode and referenceId above 2^53: %v, want 9007199254740993 echoed and the match reviewed", result)
 	}
+}
+
+// stalledWriter is a reader that takes nothing off the wire: its first Write
+// blocks until the test releases it.
+type stalledWriter struct {
+	header  http.Header
+	once    sync.Once
+	writing chan struct{} // closed when the first Write starts
+	release chan struct{}
+}
+
+func newStalledWriter() *stalledWriter {
+	return &stalledWriter{header: http.Header{}, writing: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (s *stalledWriter) Header() http.Header { return s.header }
+
+func (s *stalledWriter) WriteHeader(int) {}
+
+func (s *stalledWriter) Write(p []byte) (int, error) {
+	s.once.Do(func() { close(s.writing) })
+	<-s.release
+	return len(p), nil
+}
+
+func TestASlowReaderDoesNotHoldUpOtherCalls(t *testing.T) {
+	stalled := []struct {
+		name    string
+		control bool
+		path    string
+	}{
+		{"every worklist", true, "/sim/kyc6/worklists?env=*"},
+		{"one record, on the control port", true, readCompany},
+		{"the worklist's matches", false, worklistPath + "/matches"},
+		{"the record's matches", false, companyPath + "/matches"},
+		{"the worklist", false, worklistPath},
+		{"the records", false, worklistPath + "/businesses"},
+	}
+	for _, tc := range stalled {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, ctl := surfaces(t)
+			enrol(t, svc, defaultKey)
+			if code, out := vendorsimtest.Call(t, ctl, "POST", armCompany, `{}`, nil); code != 201 {
+				t.Fatalf("arm: %d %v", code, out)
+			}
+
+			handler := svc
+			if tc.control {
+				handler = ctl
+			}
+			slow := newStalledWriter()
+			slowDone := make(chan struct{})
+			go func() {
+				defer close(slowDone)
+				r := httptest.NewRequest("GET", tc.path, nil)
+				r.Header.Set("x-api-key", "k")
+				handler.ServeHTTP(slow, r)
+			}()
+			select {
+			case <-slow.writing:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the slow call never started writing")
+			}
+
+			otherDone := make(chan int, 1)
+			go func() {
+				code, _ := vendorsimtest.Call(t, svc, "PUT", ownerPath, `{"name":"Ada Lovelace"}`, defaultKey)
+				otherDone <- code
+			}()
+			waited := false
+			select {
+			case code := <-otherDone:
+				if code != 200 {
+					t.Errorf("the other call: %d, want 200", code)
+				}
+			case <-time.After(2 * time.Second):
+				waited = true
+				t.Error("another call waited on a reader that takes nothing off the wire")
+			}
+
+			close(slow.release)
+			<-slowDone
+			if waited {
+				<-otherDone
+			}
+		})
+	}
+}
+
+// TestAnswersAreTheirOwnCopies reads every monitoring answer while other
+// calls change what it shows, with nothing ordering the two: under -race, an
+// answer written after a.mu is released that still shares state a change
+// writes to is a reported race.
+func TestAnswersAreTheirOwnCopies(t *testing.T) {
+	svc, ctl := surfaces(t)
+	enrol(t, svc, defaultKey)
+	if code, out := vendorsimtest.Call(t, ctl, "POST", armCompany, `{"resourceId":"om-1","qrCode":"qr-1","countries":["GB"]}`, nil); code != 201 {
+		t.Fatalf("arm: %d %v", code, out)
+	}
+	reads := []struct {
+		handler http.Handler
+		path    string
+	}{
+		{ctl, "/sim/kyc6/worklists?env=*"},
+		{ctl, readCompany},
+		{svc, worklistPath},
+		{svc, worklistPath + "/matches"},
+		{svc, worklistPath + "/businesses"},
+		{svc, companyPath + "/matches"},
+		{svc, "/kyc6/businesses/om-1"},
+	}
+	var wg sync.WaitGroup
+	call := func(handler http.Handler, method, path, body string) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vendorsimtest.Call(t, handler, method, path, body, defaultKey)
+		}()
+	}
+	for range 20 {
+		for _, read := range reads {
+			call(read.handler, "GET", read.path, "")
+		}
+		call(ctl, "POST", armCompany, `{"resourceId":"om-1","datasets":["PEP"],"countries":["FR"]}`)
+		call(svc, "PUT", companyPath+"/matches/reviews", `{"reviews":[{"qrCode":"qr-1","status":"false-positive","referenceId":"r"}]}`)
+		call(svc, "PUT", companyPath, `{"name":"Southwind Coffee Ltd","addresses":[{"geography":"IE"}]}`)
+		call(svc, "PUT", worklistPath, `{"name":"Partner 7","threshold":90}`)
+	}
+	wg.Wait()
 }

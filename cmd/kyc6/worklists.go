@@ -19,6 +19,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -224,6 +225,48 @@ func emptyRecords() map[string]map[string]*record {
 	return map[string]map[string]*record{kindBusinesses: {}, kindIndividuals: {}}
 }
 
+// reply is an answer built while holding a.mu and written once it is
+// released, so a reader slow to take a large answer off the wire never holds
+// up another call. Whatever body holds is the call's own copy: nothing
+// another call changes after a.mu is released.
+type reply struct {
+	status int
+	// body is written as JSON; with no body and no errorMessage, only the
+	// status is.
+	body         any
+	errorMessage string
+}
+
+func jsonReply(status int, body any) reply {
+	return reply{status: status, body: body}
+}
+
+func errorReply(status int, message string) reply {
+	return reply{status: status, errorMessage: message}
+}
+
+func statusReply(status int) reply {
+	return reply{status: status}
+}
+
+func (rp reply) write(w http.ResponseWriter) {
+	switch {
+	case rp.errorMessage != "":
+		httputilx.Error(w, rp.status, rp.errorMessage)
+	case rp.body != nil:
+		httputilx.WriteJSON(w, rp.status, rp.body)
+	default:
+		w.WriteHeader(rp.status)
+	}
+}
+
+// underLock builds a reply holding a.mu, for the caller to write after it.
+func (a *app) underLock(build func() reply) reply {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return build()
+}
+
 // --- worklists ----------------------------------------------------------
 
 // putWorklist creates a worklist, or replaces the settings of one that
@@ -240,48 +283,48 @@ func (a *app) putWorklist(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("worklistId")
 	now := labclock.Now()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	m := a.monitorIn(tenant.Of(r.Context()))
-	wl := m.worklists[id]
-	if wl == nil {
-		wl = &worklist{id: id, created: now, records: emptyRecords()}
-		m.worklists[id] = wl
-	}
-	wl.settings = settings
-	wl.updated = now
-	out := wl.view()
-	out["worklistId"] = id
-	httputilx.WriteJSON(w, 200, out)
+	a.underLock(func() reply {
+		m := a.monitorIn(tenant.Of(r.Context()))
+		wl := m.worklists[id]
+		if wl == nil {
+			wl = &worklist{id: id, created: now, records: emptyRecords()}
+			m.worklists[id] = wl
+		}
+		wl.settings = settings
+		wl.updated = now
+		out := wl.view()
+		out["worklistId"] = id
+		return jsonReply(200, out)
+	}).write(w)
 }
 
 func (a *app) getWorklist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("worklistId")
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	wl := a.monitorIn(tenant.Of(r.Context())).worklists[id]
-	if wl == nil {
-		httputilx.Error(w, 404, "no worklist "+id)
-		return
-	}
-	httputilx.WriteJSON(w, 200, wl.view())
+	a.underLock(func() reply {
+		wl := a.monitorIn(tenant.Of(r.Context())).worklists[id]
+		if wl == nil {
+			return errorReply(404, "no worklist "+id)
+		}
+		return jsonReply(200, wl.view())
+	}).write(w)
 }
 
 func (a *app) deleteWorklist(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("worklistId")
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	m := a.monitorIn(tenant.Of(r.Context()))
-	if m.worklists[id] == nil {
-		httputilx.Error(w, 404, "no worklist "+id)
-		return
-	}
-	delete(m.worklists, id)
-	w.WriteHeader(http.StatusNoContent)
+	a.underLock(func() reply {
+		m := a.monitorIn(tenant.Of(r.Context()))
+		if m.worklists[id] == nil {
+			return errorReply(404, "no worklist "+id)
+		}
+		delete(m.worklists, id)
+		return statusReply(http.StatusNoContent)
+	}).write(w)
 }
 
 // view is the worklist as KYC6 describes it: its settings as they were
-// sent, and the counts of what is on it.
+// sent, and the counts of what is on it. The settings map is the view's own;
+// a value in it is shared with the worklist, which only ever replaces its
+// settings whole and never changes a value in them.
 func (wl *worklist) view() map[string]any {
 	out := map[string]any{}
 	for k, v := range wl.settings {
@@ -310,13 +353,19 @@ func openMatches(records map[string]*record) int {
 // same moment by kind, record id and the order they were put on the record.
 func (a *app) worklistMatches(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("worklistId")
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	wl := a.monitorIn(tenant.Of(r.Context())).worklists[id]
-	if wl == nil {
-		httputilx.Error(w, 404, "no worklist "+id)
-		return
-	}
+	a.underLock(func() reply {
+		wl := a.monitorIn(tenant.Of(r.Context())).worklists[id]
+		if wl == nil {
+			return errorReply(404, "no worklist "+id)
+		}
+		matches := openMatchViews(wl)
+		return jsonReply(200, map[string]any{"matches": matches, "totalMatches": len(matches)})
+	}).write(w)
+}
+
+// openMatchViews is the worklist's open matches as worklistMatches lists
+// them. The caller holds a.mu.
+func openMatchViews(wl *worklist) []map[string]any {
 	type found struct {
 		rec *record
 		m   *match
@@ -340,11 +389,11 @@ func (a *app) worklistMatches(w http.ResponseWriter, r *http.Request) {
 			"resourceId": f.m.resourceID,
 			"score":      f.m.score,
 			"matchName":  f.m.name,
-			"datasets":   f.m.datasets,
+			"datasets":   slices.Clone(f.m.datasets),
 			"status":     f.m.status,
 		})
 	}
-	httputilx.WriteJSON(w, 200, map[string]any{"matches": matches, "totalMatches": len(matches)})
+	return matches
 }
 
 // --- records ------------------------------------------------------------
@@ -372,39 +421,38 @@ func (a *app) putRecord(kind string) http.HandlerFunc {
 			return
 		}
 		now := labclock.Now()
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		m := a.monitorIn(tenant.Of(r.Context()))
-		wl := m.worklists[worklistID]
-		if wl == nil {
-			wl = &worklist{id: worklistID, settings: map[string]any{}, created: now, updated: now, records: emptyRecords()}
-			m.worklists[worklistID] = wl
-		}
-		rec := wl.records[kind][recordID]
-		if rec == nil {
-			rec = &record{id: recordID, kind: kind, created: now, autoReviews: map[string]*review{}}
-			wl.records[kind][recordID] = rec
-		}
-		rec.name, rec.dob, rec.addresses, rec.updated = body.Name, body.DOB, body.Addresses, now
-		out := rec.view(rec.tally())
-		out["monitorRecordId"] = recordID
-		out["worklistId"] = worklistID
-		httputilx.WriteJSON(w, 200, out)
+		a.underLock(func() reply {
+			m := a.monitorIn(tenant.Of(r.Context()))
+			wl := m.worklists[worklistID]
+			if wl == nil {
+				wl = &worklist{id: worklistID, settings: map[string]any{}, created: now, updated: now, records: emptyRecords()}
+				m.worklists[worklistID] = wl
+			}
+			rec := wl.records[kind][recordID]
+			if rec == nil {
+				rec = &record{id: recordID, kind: kind, created: now, autoReviews: map[string]*review{}}
+				wl.records[kind][recordID] = rec
+			}
+			rec.name, rec.dob, rec.addresses, rec.updated = body.Name, body.DOB, body.Addresses, now
+			out := rec.view(rec.tally())
+			out["monitorRecordId"] = recordID
+			out["worklistId"] = worklistID
+			return jsonReply(200, out)
+		}).write(w)
 	}
 }
 
 func (a *app) deleteRecord(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		wl, _, missing := a.findRecord(tenant.Of(r.Context()), worklistID, kind, recordID)
-		if missing != "" {
-			httputilx.Error(w, 404, missing)
-			return
-		}
-		delete(wl.records[kind], recordID)
-		w.WriteHeader(http.StatusNoContent)
+		a.underLock(func() reply {
+			wl, _, missing := a.findRecord(tenant.Of(r.Context()), worklistID, kind, recordID)
+			if missing != "" {
+				return errorReply(404, missing)
+			}
+			delete(wl.records[kind], recordID)
+			return statusReply(http.StatusNoContent)
+		}).write(w)
 	}
 }
 
@@ -420,38 +468,37 @@ func (a *app) listRecords(kind string) http.HandlerFunc {
 			httputilx.Error(w, 400, fmt.Sprintf("status %q is not one of open, closed", status))
 			return
 		}
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		wl := a.monitorIn(tenant.Of(r.Context())).worklists[worklistID]
-		if wl == nil {
-			httputilx.Error(w, 404, "no worklist "+worklistID)
-			return
-		}
-		records := sortedRecords(wl.records[kind])
-		listed := []map[string]any{}
-		openRecords, open, truePositive, falsePositive := 0, 0, 0, 0
-		for _, rec := range records {
-			counts := rec.tally()
-			open += counts[matchOpen]
-			truePositive += counts[matchTruePositive]
-			falsePositive += counts[matchFalsePositive]
-			recStatus := recordStatus(counts)
-			if recStatus == recordOpen {
-				openRecords++
+		a.underLock(func() reply {
+			wl := a.monitorIn(tenant.Of(r.Context())).worklists[worklistID]
+			if wl == nil {
+				return errorReply(404, "no worklist "+worklistID)
 			}
-			if status == "" || recStatus == status {
-				listed = append(listed, rec.view(counts))
+			records := sortedRecords(wl.records[kind])
+			listed := []map[string]any{}
+			openRecords, open, truePositive, falsePositive := 0, 0, 0, 0
+			for _, rec := range records {
+				counts := rec.tally()
+				open += counts[matchOpen]
+				truePositive += counts[matchTruePositive]
+				falsePositive += counts[matchFalsePositive]
+				recStatus := recordStatus(counts)
+				if recStatus == recordOpen {
+					openRecords++
+				}
+				if status == "" || recStatus == status {
+					listed = append(listed, rec.view(counts))
+				}
 			}
-		}
-		httputilx.WriteJSON(w, 200, map[string]any{
-			"monitorRecords":            listed,
-			"monitorRecordsCount":       len(records),
-			"openMonitorRecordsCount":   openRecords,
-			"openMatchesCount":          open,
-			"truePositiveMatchesCount":  truePositive,
-			"falsePositiveMatchesCount": falsePositive,
-			"discardedMatchesCount":     0,
-		})
+			return jsonReply(200, map[string]any{
+				"monitorRecords":            listed,
+				"monitorRecordsCount":       len(records),
+				"openMonitorRecordsCount":   openRecords,
+				"openMatchesCount":          open,
+				"truePositiveMatchesCount":  truePositive,
+				"falsePositiveMatchesCount": falsePositive,
+				"discardedMatchesCount":     0,
+			})
+		}).write(w)
 	}
 }
 
@@ -481,7 +528,9 @@ func recordStatus(counts map[string]int) string {
 	return recordClosed
 }
 
-// view is the record as KYC6 lists it; counts is its tally.
+// view is the record as KYC6 lists it; counts is its tally. Its addresses are
+// shared with the record, which only ever replaces them whole and never
+// changes one.
 func (rec *record) view(counts map[string]int) map[string]any {
 	addresses := rec.addresses
 	if addresses == nil {
@@ -532,14 +581,13 @@ func (rec *record) view(counts map[string]int) map[string]any {
 
 func (a *app) recordMatches(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		_, rec, missing := a.findRecord(tenant.Of(r.Context()), r.PathValue("worklistId"), kind, r.PathValue("recordId"))
-		if missing != "" {
-			httputilx.Error(w, 404, missing)
-			return
-		}
-		httputilx.WriteJSON(w, 200, map[string]any{"matches": rec.matchViews()})
+		a.underLock(func() reply {
+			_, rec, missing := a.findRecord(tenant.Of(r.Context()), r.PathValue("worklistId"), kind, r.PathValue("recordId"))
+			if missing != "" {
+				return errorReply(404, missing)
+			}
+			return jsonReply(200, map[string]any{"matches": rec.matchViews()})
+		}).write(w)
 	}
 }
 
@@ -560,8 +608,8 @@ func (m *match) view() map[string]any {
 		"score":         m.score,
 		"match":         m.name,
 		"name":          m.name,
-		"datasets":      m.datasets,
-		"countries":     m.countries,
+		"datasets":      slices.Clone(m.datasets),
+		"countries":     slices.Clone(m.countries),
 		"version":       m.version,
 		"matchVersion":  m.version,
 	}
@@ -615,38 +663,38 @@ func (a *app) reviewMatches(kind, endpoint string) http.HandlerFunc {
 			return
 		}
 		now := labclock.Now()
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		_, rec, missing := a.findRecord(tenant.Of(r.Context()), r.PathValue("worklistId"), kind, r.PathValue("recordId"))
-		if missing != "" {
-			httputilx.Error(w, 404, missing)
-			return
-		}
-		results := []map[string]any{}
-		refused := 0
-		for _, entry := range entries {
-			rv := newReview(endpoint, entry, now)
-			rec.apply(rv)
-			rec.reviews = append(rec.reviews, rv)
-			result := map[string]any{"referenceId": rv.ReferenceID, "statusCode": rv.StatusCode}
-			if rv.Error != nil {
-				refused++
-				result["error"] = rv.Error
+		a.underLock(func() reply {
+			_, rec, missing := a.findRecord(tenant.Of(r.Context()), r.PathValue("worklistId"), kind, r.PathValue("recordId"))
+			if missing != "" {
+				return errorReply(404, missing)
 			}
-			results = append(results, result)
-		}
-		if len(rec.reviews) > reviewsKept {
-			// A copy, so the older reviews are not kept alive by the array.
-			rec.reviews = append([]*review(nil), rec.reviews[len(rec.reviews)-reviewsKept:]...)
-		}
-		rec.updated = now
-		hasErrors := refused > 0
-		if hasErrors {
-			// KYC6 answers such a batch 200 all the same; the journal marks
-			// it a warning.
-			activity.Refuse(r.Context(), fmt.Sprintf("%d of %d refused", refused, len(entries)))
-		}
-		httputilx.WriteJSON(w, 200, map[string]any{"hasErrors": hasErrors, "results": results})
+			results := []map[string]any{}
+			refused := 0
+			for _, entry := range entries {
+				rv := newReview(endpoint, entry, now)
+				rec.apply(rv)
+				rec.reviews = append(rec.reviews, rv)
+				result := map[string]any{"referenceId": rv.ReferenceID, "statusCode": rv.StatusCode}
+				if rv.Error != nil {
+					refused++
+					errorCopy := *rv.Error
+					result["error"] = &errorCopy
+				}
+				results = append(results, result)
+			}
+			if len(rec.reviews) > reviewsKept {
+				// A copy, so the older reviews are not kept alive by the array.
+				rec.reviews = append([]*review(nil), rec.reviews[len(rec.reviews)-reviewsKept:]...)
+			}
+			rec.updated = now
+			hasErrors := refused > 0
+			if hasErrors {
+				// KYC6 answers such a batch 200 all the same; the journal
+				// marks it a warning.
+				activity.Refuse(r.Context(), fmt.Sprintf("%d of %d refused", refused, len(entries)))
+			}
+			return jsonReply(200, map[string]any{"hasErrors": hasErrors, "results": results})
+		}).write(w)
 	}
 }
 
@@ -753,26 +801,24 @@ func (a *app) armMatch(kind string) http.HandlerFunc {
 		}
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
 		now := labclock.Now()
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		_, rec, missing := a.findRecord(env, worklistID, kind, recordID)
-		if missing != "" {
-			httputilx.Error(w, 404, missing+" in environment "+env)
-			return
-		}
-		m, created, conflict := a.monitorIn(env).arm(rec, body, now)
-		if conflict != "" {
-			httputilx.Error(w, 409, conflict+" in environment "+env)
-			return
-		}
-		code := 200
-		if created {
-			code = 201
-		}
-		log.Printf("kyc6: match %s (version %d) on %s %s, worklist %s, environment %s", m.resourceID, m.version, singular(kind), recordID, worklistID, env)
-		httputilx.WriteJSON(w, code, map[string]any{
-			"env": env, "worklistId": worklistID, "kind": kind, "recordId": recordID, "match": m.view(),
-		})
+		a.underLock(func() reply {
+			_, rec, missing := a.findRecord(env, worklistID, kind, recordID)
+			if missing != "" {
+				return errorReply(404, missing+" in environment "+env)
+			}
+			m, created, conflict := a.monitorIn(env).arm(rec, body, now)
+			if conflict != "" {
+				return errorReply(409, conflict+" in environment "+env)
+			}
+			code := 200
+			if created {
+				code = 201
+			}
+			log.Printf("kyc6: match %s (version %d) on %s %s, worklist %s, environment %s", m.resourceID, m.version, singular(kind), recordID, worklistID, env)
+			return jsonReply(code, map[string]any{
+				"env": env, "worklistId": worklistID, "kind": kind, "recordId": recordID, "match": m.view(),
+			})
+		}).write(w)
 	}
 }
 
@@ -900,25 +946,26 @@ func (a *app) readRecord(kind string) http.HandlerFunc {
 			return
 		}
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
-		a.mu.Lock()
-		defer a.mu.Unlock()
-		_, rec, missing := a.findRecord(env, worklistID, kind, recordID)
-		if missing != "" {
-			httputilx.Error(w, 404, missing+" in environment "+env)
-			return
-		}
-		out := rec.labView()
-		out["env"], out["worklistId"], out["kind"] = env, worklistID, kind
-		httputilx.WriteJSON(w, 200, out)
+		a.underLock(func() reply {
+			_, rec, missing := a.findRecord(env, worklistID, kind, recordID)
+			if missing != "" {
+				return errorReply(404, missing+" in environment "+env)
+			}
+			out := rec.labView()
+			out["env"], out["worklistId"], out["kind"] = env, worklistID, kind
+			return jsonReply(200, out)
+		}).write(w)
 	}
 }
 
+// labView is the record as readRecord shows it. Its reviews are copies of
+// the record's.
 func (rec *record) labView() map[string]any {
 	out := rec.view(rec.tally())
 	out["matches"] = rec.matchViews()
-	autoReviews := []*review{}
+	autoReviews := []review{}
 	for _, rv := range rec.autoReviews {
-		autoReviews = append(autoReviews, rv)
+		autoReviews = append(autoReviews, rv.copy())
 	}
 	sort.Slice(autoReviews, func(i, j int) bool {
 		if !autoReviews[i].At.Equal(autoReviews[j].At) {
@@ -927,11 +974,22 @@ func (rec *record) labView() map[string]any {
 		return autoReviews[i].QRCode < autoReviews[j].QRCode
 	})
 	out["autoReviews"] = autoReviews
-	reviews := rec.reviews
-	if reviews == nil {
-		reviews = []*review{}
+	reviews := make([]review, 0, len(rec.reviews))
+	for _, rv := range rec.reviews {
+		reviews = append(reviews, rv.copy())
 	}
 	out["reviews"] = reviews
+	return out
+}
+
+// copy is the review with its own error. Its matchVersion is the decoded
+// JSON value it was sent with, which nothing changes.
+func (rv *review) copy() review {
+	out := *rv
+	if rv.Error != nil {
+		errorCopy := *rv.Error
+		out.Error = &errorCopy
+	}
 	return out
 }
 
@@ -944,8 +1002,14 @@ func (a *app) readWorklists(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 404, "no environment "+scope+" at kyc6")
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.underLock(func() reply {
+		return jsonReply(200, map[string]any{"env": scope, "worklists": a.worklistViews(scope)})
+	}).write(w)
+}
+
+// worklistViews is every worklist in scope as readWorklists shows it. The
+// caller holds a.mu.
+func (a *app) worklistViews(scope string) []map[string]any {
 	out := []map[string]any{}
 	envs := make([]string, 0, len(a.monitoring))
 	for env := range a.monitoring {
@@ -976,7 +1040,7 @@ func (a *app) readWorklists(w http.ResponseWriter, r *http.Request) {
 			out = append(out, view)
 		}
 	}
-	httputilx.WriteJSON(w, 200, map[string]any{"env": scope, "worklists": out})
+	return out
 }
 
 // decodeBody reads a vendor body into v: any field, but exactly one JSON
