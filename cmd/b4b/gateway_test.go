@@ -17,19 +17,17 @@ import (
 	"time"
 )
 
-// The platform gateway's B4B client (buddy, apps/gateway/src/modules/b4b)
-// is the one run against the real vendor, so these tests send its request
-// bodies exactly as it builds them, for a UK private limited company with
-// one owner who is its director, no documents and one outlet:
+// A platform gateway's B4B client, one run against the real vendor, walks
+// a boarding chain; these tests send its request bodies exactly as it
+// builds them, for a UK private limited company with one owner who is its
+// director, no documents and one outlet:
 //
-//   - company:       lifecycle.orchestrator.ts createB4bCompanyForApplication
-//   - PATCH company: syncExistingB4bCompany
-//   - addresses:     mapAddressToB4bPayload (outlets as trading, owners as ubo)
-//   - person:        b4b-owner-payload.mapper.ts mapNaturalPersonToB4b
-//   - extended:      createB4bExtendedCompanyInfoForApplication and
-//     b4b-extended-company-payload.mapper.ts
-//   - beneficiary:   b4b-entity.service.ts submitBeneficiary
-//   - upload slot:   b4b-document-payload.mapper.ts buildUploadMetadata
+//   - company:       the create, or a PATCH for a company already boarded
+//   - addresses:     one per outlet (trading) and owner (ubo)
+//   - person:        the owner as a natural person
+//   - extended:      the regulatory profile
+//   - beneficiary:   one per outlet
+//   - upload slot:   a document's metadata, then its bytes
 //
 // and read back only what it reads. Placeholders in {braces} are the ids
 // the chain learns as it goes.
@@ -44,7 +42,7 @@ const gatewayCreateCompany = `{
   "legal_name": "Southwind Coffee Ltd",
   "company_type": "kyb",
   "acquirer": "Worldline",
-  "primary_channel": "Infinite Payments",
+  "primary_channel": "Online",
   "merchant_category_code": "5814",
   "company_documents_waived": true,
   "person_documents_waived": true,
@@ -97,7 +95,7 @@ const gatewayPerson = `{
 
 // PRIVATE_LIMITED_COMPANY maps to "limited"; the director who is the
 // beneficial owner is a key individual with director, ubo, and the
-// authorised_representative role completeKeyIndividualRoles adds.
+// authorised_representative role the client adds to every key individual.
 const gatewayExtended = `{
   "company_type": "limited",
   "registered_company_no": "12345678",
@@ -131,7 +129,7 @@ const gatewayUpdateCompany = `{
   "legal_name": "Southwind Coffee Ltd",
   "company_type": "kyb",
   "acquirer": "Worldline",
-  "primary_channel": "Infinite Payments",
+  "primary_channel": "Online",
   "merchant_category_code": "5812",
   "company_documents_waived": true,
   "person_documents_waived": true
@@ -157,9 +155,9 @@ func newGatewayLab(t *testing.T) *gatewayLab {
 	return lab
 }
 
-// jsonwebtokenRS512 is what the gateway's B4bAuthService signs:
-// jwt.sign({aud}, key, {algorithm: RS512, keyid, expiresIn}), which adds
-// typ to the header and iat and exp to the claims.
+// jsonwebtokenRS512 is what a client signing with the jsonwebtoken library
+// sends: jwt.sign({aud}, key, {algorithm: RS512, keyid, expiresIn}), which
+// adds typ to the header and iat and exp to the claims.
 func jsonwebtokenRS512(t *testing.T, key *rsa.PrivateKey, kid string) string {
 	t.Helper()
 	enc := base64.RawURLEncoding
@@ -193,11 +191,10 @@ func (lab *gatewayLab) call(t *testing.T, method, path, body string, want int) m
 	return object(t, b)
 }
 
-// gatewayTakesSanctionsCallback mirrors the gateway's B4bCallbackSchema
-// (callback/dto/b4b-callback.dto.ts): z.object({id: z.string().min(1),
-// sanctions_status: z.enum(['pass','fail','review']), external_ref:
-// z.string().optional()}). A plain z.object strips keys it does not
-// declare, so an extra key is not a refusal.
+// gatewayTakesSanctionsCallback mirrors a client's callback schema: id a
+// non-empty string, sanctions_status one of pass, fail or review, and an
+// optional string external_ref. It strips keys it does not declare, so an
+// extra key is not a refusal.
 func gatewayTakesSanctionsCallback(body string) (map[string]any, error) {
 	var raw map[string]any
 	if err := json.Unmarshal([]byte(body), &raw); err != nil {
@@ -227,7 +224,7 @@ func gatewayTakesSanctionsCallback(body string) (map[string]any, error) {
 func TestTheGatewaysUKBoardingChainRunsEndToEnd(t *testing.T) {
 	lab := newGatewayLab(t)
 
-	// createCompany reads id; it logs address.type.
+	// The company create reads id; it logs address.type.
 	company := lab.call(t, "POST", "/oversight/v1/companies", gatewayCreateCompany, 201)
 	companyID, _ := company["id"].(string)
 	if companyID == "" {
@@ -241,7 +238,7 @@ func TestTheGatewaysUKBoardingChainRunsEndToEnd(t *testing.T) {
 		t.Errorf("the answer drops the lab's earlier address names, which its other clients read: %v", office)
 	}
 
-	// addAddress reads id, and uses it: the owner's becomes the person's
+	// The address create reads id, and uses it: the owner's becomes the person's
 	// address_id, the outlet's the profile's business_address_id.
 	for _, fixture := range []string{gatewayOutletAddress, gatewayOwnerAddress} {
 		var sent map[string]any
@@ -252,7 +249,7 @@ func TestTheGatewaysUKBoardingChainRunsEndToEnd(t *testing.T) {
 		}
 	}
 
-	// submitOwner reads id, external_ref and the inline sanctions_status.
+	// The owner's create reads id, external_ref and the inline sanctions_status.
 	person := lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",
 		fill(gatewayPerson, map[string]string{"callback_url": lab.callback}), 201)
 	personID, _ := person["id"].(string)
@@ -277,7 +274,7 @@ func TestTheGatewaysUKBoardingChainRunsEndToEnd(t *testing.T) {
 		t.Fatalf("extended answer = %v, want the fields the gateway's response type names", extended)
 	}
 
-	// submitBeneficiary reads id and external_ref.
+	// The beneficiary create reads id and external_ref.
 	ben := lab.call(t, "POST", "/oversight/v1/beneficiaries",
 		fill(gatewayBeneficiary, map[string]string{"company_id": companyID, "callback_url": lab.callback}), 201)
 	benID, _ := ben["id"].(string)
@@ -334,8 +331,15 @@ func TestTheGatewaysReferencesMustNameThisCompanysRecords(t *testing.T) {
 		fill(gatewayPerson, map[string]string{"callback_url": lab.callback}), 400) // no such address yet
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses", gatewayOwnerAddress, 201)
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses", gatewayOwnerAddress, 201) // a retry: the stored address
-	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses",
-		strings.Replace(gatewayOwnerAddress, "3 Home Road", "4 Home Road", 1), 422) // another address under the same id
+	moved := lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/addresses",
+		strings.Replace(gatewayOwnerAddress, "3 Home Road", "4 Home Road", 1), 201) // a re-run after an edit: the update
+	if moved["id"] != "9b2e6f1a-7c3d-5e4f-8a9b-0c1d2e3f4a5b" || moved["line_1"] != "4 Home Road" {
+		t.Fatalf("changed address under a known id = %v, want it updated in place", moved)
+	}
+	listed := lab.call(t, "GET", "/oversight/v1/companies/"+companyID+"/addresses", "", 200)["addresses"].([]any)
+	if len(listed) != 2 || listed[1].(map[string]any)["line_1"] != "4 Home Road" {
+		t.Fatalf("addresses = %v, want the office and the owner's updated address", listed)
+	}
 	lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",
 		fill(gatewayPerson, map[string]string{"callback_url": "http://elsewhere.example" + gatewayCallbackPath}), 400)
 	personID := lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/people",
@@ -360,7 +364,7 @@ func TestTheGatewaysExistingCompanyBranchPatchesTheCompany(t *testing.T) {
 	companyID := lab.call(t, "POST", "/oversight/v1/companies", gatewayCreateCompany, 201)["id"].(string)
 	officeID := lab.call(t, "GET", "/oversight/v1/companies/"+companyID, "", 200)["address"].(map[string]any)["id"]
 
-	// updateCompany reads id, external_ref and legal_name.
+	// The PATCH reads id, external_ref and legal_name.
 	got := lab.call(t, "PATCH", "/oversight/v1/companies/"+companyID, gatewayUpdateCompany, 200)
 	if got["id"] != companyID || got["external_ref"] != "IP000123" || got["legal_name"] != "Southwind Coffee Ltd" {
 		t.Fatalf("PATCH answer = %v, want the company", got)
@@ -382,6 +386,24 @@ func TestTheGatewaysExistingCompanyBranchPatchesTheCompany(t *testing.T) {
 	if address["postcode"] != "EC1A 2BB" || address["line_1"] != "1 Simulation Way" || address["id"] != officeID {
 		t.Fatalf("patched address = %v, want the new postcode on the same registered office", address)
 	}
+
+	// A field sent as "" clears it, under either spelling, and the
+	// registered office's record in GET .../addresses with it.
+	for _, name := range []string{"line_2", "address_line_2"} {
+		set := lab.call(t, "PATCH", "/oversight/v1/companies/"+companyID, `{"address": {"`+name+`": "Unit 2"}}`, 200)
+		if line2 := set["address"].(map[string]any)["line_2"]; line2 != "Unit 2" {
+			t.Fatalf("%s set: line_2 = %v, want Unit 2", name, line2)
+		}
+		cleared := lab.call(t, "PATCH", "/oversight/v1/companies/"+companyID, `{"address": {"`+name+`": ""}}`, 200)
+		clearedAddress := cleared["address"].(map[string]any)
+		if clearedAddress["line_2"] != nil || clearedAddress["address_line_2"] != nil || clearedAddress["postcode"] != "EC1A 2BB" {
+			t.Fatalf("%s sent empty: address = %v, want line_2 cleared in both spellings and the rest kept", name, clearedAddress)
+		}
+		listed := lab.call(t, "GET", "/oversight/v1/companies/"+companyID+"/addresses", "", 200)["addresses"].([]any)
+		if office := listed[0].(map[string]any); office["id"] != officeID || office["line_2"] != nil {
+			t.Fatalf("%s sent empty: addresses = %v, want the registered office's line_2 cleared", name, listed)
+		}
+	}
 }
 
 // The gateway's document upload: a slot for the company, the bytes PUT to
@@ -402,7 +424,7 @@ func TestTheGatewaysDocumentUploadIsASlotAndAPut(t *testing.T) {
 		`{"filename": "extract.pdf", "byte_size": 27, "checksum": "not-md5", "content_type": "application/pdf"}`, 400)
 	lab.call(t, "POST", "/oversight/v1/companies/cmp_nobody/uploads", metadata, 404)
 
-	// createDocumentUpload reads id, url and headers.
+	// The slot create reads id, url and headers.
 	slot := lab.call(t, "POST", "/oversight/v1/companies/"+companyID+"/uploads", metadata, 201)
 	slotID, _ := slot["id"].(string)
 	url, _ := slot["url"].(string)
@@ -436,7 +458,7 @@ func TestTheGatewaysDocumentUploadIsASlotAndAPut(t *testing.T) {
 	if st, _ := put(lab.l.vendor.URL+uploadPath+"0000", file); st != 403 {
 		t.Fatalf("PUT to a URL no slot has = %d, want 403", st)
 	}
-	// uploadDocumentBytes takes only a 200 with an empty body.
+	// The client takes only a 200 with an empty body as success.
 	if st, body := put(url, file); st != 200 || body != "" {
 		t.Fatalf("PUT of the declared bytes = %d %q, want 200 and an empty body", st, body)
 	}
@@ -449,5 +471,36 @@ func TestTheGatewaysDocumentUploadIsASlotAndAPut(t *testing.T) {
 	receipt := lab.call(t, "GET", "/oversight/v1/uploads/"+slotID, "", 200)
 	if _, leaked := receipt["upload_token"]; leaked {
 		t.Errorf("the receipt carries the slot's secret: %v", receipt)
+	}
+}
+
+// A client that reaches b4b under a path prefix, through a proxy that
+// strips it and names it in X-Forwarded-Prefix, gets a slot URL under the
+// same prefix.
+func TestAnUploadSlotURLKeepsTheCallersPathPrefix(t *testing.T) {
+	lab := newGatewayLab(t)
+	companyID := lab.call(t, "POST", "/oversight/v1/companies", gatewayCreateCompany, 201)["id"].(string)
+	req, err := http.NewRequest("POST", lab.l.vendor.URL+"/oversight/v1/companies/"+companyID+"/uploads",
+		strings.NewReader(`{"filename": "x.pdf", "byte_size": 3, "checksum": "rL0Y20zC+Fzt72VPzMSk2A==", "content_type": "application/pdf"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+lab.token)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Forwarded-Host", "lab.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Prefix", "/b4b/")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 201 {
+		t.Fatalf("slot create = %d %s", resp.StatusCode, b)
+	}
+	url, _ := object(t, b)["url"].(string)
+	if !strings.HasPrefix(url, "https://lab.example/b4b"+uploadPath) {
+		t.Fatalf("slot url = %q, want it under https://lab.example/b4b", url)
 	}
 }

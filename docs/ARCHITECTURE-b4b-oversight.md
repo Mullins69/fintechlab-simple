@@ -4,8 +4,8 @@
 
 `docs/ARCHITECTURE-vendor-corrections.md` §4 built the payout half of the
 B4B mock: beneficiaries, the payment lifecycle, the callbacks, the Banking
-Circle bridge. It deliberately left boarding out — "buddy's real
-registration flow is out of scope" (Addendum §F).
+Circle bridge. It deliberately left boarding out — the platform's
+registration flow was out of scope (Addendum §F).
 
 That gap turned out to be where the integration actually breaks. A client
 could reach `POST /payments` here without ever proving it could board a
@@ -146,12 +146,10 @@ webhook that never arrived, and it would wait for one forever.
 ### The platform gateway's client is the reference for boarding
 
 The boarding half was first derived from readings of the vendor's docs
-(below) and never run against a real client. The platform gateway's B4B
-client (buddy, `apps/gateway/src/modules/b4b/`, driven by
-`runB4bBoardingChainForApplication` in
-`apps/gateway/src/modules/lifecycle/orchestrators/lifecycle.orchestrator.ts`)
-is the one run against the real vendor, with comments saying its field
-names and required markers were checked against the vendor's spec. Where
+(below) and never run against a real client. A platform gateway's B4B
+client, driven by its boarding chain, is one run against the real vendor,
+with comments saying its field names and required markers were checked
+against the vendor's spec. Where
 the two disagreed on a boarding route, this lab changed to the gateway's
 shape; none of the lab's readings cited vendor evidence that contradicts
 it. The lab's earlier names stay accepted on input, so this lab's own e2e
@@ -166,15 +164,15 @@ What changed, route by route:
 | `POST /companies` | `address.address_line_1`, `postal_code`; inline address typed `registered` | `address.{line_1, city, region, postcode, country, type: registered_office}`; reads `id` | both spellings in and out; type kept (default `registered`, as before) |
 | `GET /companies/{id}` | `address` without an id | reads `address.id` as `registered_office_address_id` | `address` is the stored registered office, with its id |
 | `PATCH /companies/{id}` | not served | KYB fields on a re-run for an existing company; reads `id` | served |
-| `POST /companies/{id}/addresses` | `address_line_1`, `postal_code`; `id` echoed under `extra` | `{id, type, line_1, city, country, line_2?, region?, postcode?}`; reads `id` | both spellings; the client's `id` kept as the address id (the same body again answers the stored address; another under the id is 422) |
+| `POST /companies/{id}/addresses` | `address_line_1`, `postal_code`; `id` echoed under `extra` | `{id, type, line_1, city, country, line_2?, region?, postcode?}`; reads `id` | both spellings; the client's `id` kept as the address id (the same body again answers the stored address; a changed one under the id updates it) |
 | `POST /companies/{id}/people` | `entity_type`, `legal_name`, `roles`, `phone`, `nationality`, inline `address`; callback to the environment only | `type`, `name`, `role`, `telephone_number`, `positions_within_business`, `countries_of_citizenship`, `address_id`, `callback_url`; reads `id`, `external_ref`, inline `sanctions_status` | both in; `address_id` must be the company's; callback to `callback_url` when given |
 | `POST /companies/{id}/extended` | `documents: ["doc_…"]`; `registered_company_no` required | `documents: [{type, document}]`, `company_type`, `registered_office_address_id`, `business_address_id`, `tax_numbers`, `vat_number`, `company_website`, `business_activities`, `compliance`, `ownership_structure`; `registered_company_no` optional | both document forms; ids checked against the company; `registered_company_no` optional |
 | `POST /companies/{id}/uploads` + PUT | not served (only `POST /uploads`) | `{filename, byte_size, checksum, content_type}` → reads `{id, url, headers}`, PUTs bytes, wants `200` + empty body | served; size and MD5 enforced; a profile naming a slot with no bytes is refused |
 | `POST /beneficiaries` | no `beneficiary_type` (dropped) | `beneficiary_type`; reads `id`, `external_ref` | kept and validated |
 
 The callbacks needed no change of shape. The gateway's callback schema is
-`{id, sanctions_status: pass|fail|review, external_ref?}` as a plain
-`z.object`, which strips undeclared keys rather than refusing them, so the
+`{id, sanctions_status: pass|fail|review, external_ref?}`, and it strips
+undeclared keys rather than refusing them, so the
 person callback's `pep_sanctions_status` and the beneficiary callback's
 `status` and `disabled_at` arrive and are ignored. That is a finding about
 the gateway, not something this lab should hide: a PEP hit with a clean

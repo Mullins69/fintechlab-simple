@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -41,7 +42,10 @@ type directory struct {
 	peopleByCompany map[string][]string
 	extended        map[string]*ExtendedProfile
 	documents       map[string]*Document
-	vibans          map[string][]*Viban
+	// uploadsByToken indexes upload slots by the secret token their URL
+	// carries, so a PUT finds its slot without scanning every document.
+	uploadsByToken map[string]string
+	vibans         map[string][]*Viban
 
 	// OnChange fires after any mutation, with no lock held. Nil disables
 	// it, which is what tests want.
@@ -71,6 +75,7 @@ func NewDirectory(newID func(prefix string) string) *Directory {
 		peopleByCompany: map[string][]string{},
 		extended:        map[string]*ExtendedProfile{},
 		documents:       map[string]*Document{},
+		uploadsByToken:  map[string]string{},
 		vibans:          map[string][]*Viban{},
 	}}
 }
@@ -238,7 +243,7 @@ func (d *Directory) UpdateCompany(id string, p CompanyPatch) (*Company, error) {
 	}
 	if p.Address != nil && c.Address != nil {
 		office := *c.Address
-		office.Address = patchAddress(office.Address, p.Address.normalized()).normalized()
+		office.Address = p.Address.applyTo(office.Address).normalized()
 		if err := office.Address.Validate(); err != nil {
 			d.mu.Unlock()
 			return nil, err
@@ -277,21 +282,6 @@ func setString(field *string, value *string) {
 	if value != nil {
 		*field = *value
 	}
-}
-
-// patchAddress is current with every non-empty field of change in its
-// place.
-func patchAddress(current, change Address) Address {
-	for _, f := range []struct{ to, from *string }{
-		{&current.Line1, &change.Line1}, {&current.Line2, &change.Line2}, {&current.Line3, &change.Line3},
-		{&current.City, &change.City}, {&current.Region, &change.Region},
-		{&current.Postcode, &change.Postcode}, {&current.Country, &change.Country},
-	} {
-		if *f.from != "" {
-			*f.to = *f.from
-		}
-	}
-	return current
 }
 
 // replaceAddressLocked swaps the stored address with a's id for a copy of
@@ -373,7 +363,9 @@ func (d *Directory) SetCompanySanctions(id, status string) (*Company, bool, erro
 
 // --- addresses --------------------------------------------------------
 
-// AddAddress registers an address against a company.
+// AddAddress registers an address against a company. A create under an
+// id the company already has updates that address and answers as a create
+// would; the same body again answers with the stored address.
 func (d *Directory) AddAddress(companyID string, p AddressParams) (*CompanyAddress, error) {
 	if err := p.Validate(); err != nil {
 		return nil, err
@@ -386,15 +378,43 @@ func (d *Directory) AddAddress(companyID string, p AddressParams) (*CompanyAddre
 	}
 	if existing := d.findAddressLocked(c.ID, p.ID); p.ID != "" && existing != nil {
 		// A client retrying a create whose answer it lost sends the same body
-		// again: that gets the stored address, anything else under the id is
-		// refused.
-		if existing.Type == p.Type && existing.Address == p.Address.normalized() {
+		// again: that gets the stored address. A client re-running its
+		// boarding chain after the address was edited sends the new data
+		// under the same id: that updates the address, which is the only
+		// way to change one that is not the registered office.
+		isOffice := c.Address != nil && c.Address.ID == existing.ID
+		if isOffice && existing.Type != p.Type {
+			// The registered office stays one: a different type under its
+			// id would make the company's inline address something else.
+			d.mu.Unlock()
+			return nil, fmt.Errorf("%w: address %q is company %s's registered office, of type %q; it cannot become type %q",
+				ErrDuplicate, existing.ID, c.ID, existing.Type, p.Type)
+		}
+		if existing.Type == p.Type && existing.Address == p.Address.normalized() && sameExtra(existing.Extra, p.Extra) {
 			cp := *existing
 			d.mu.Unlock()
 			return &cp, nil
 		}
+		updated := *existing
+		updated.Type = p.Type
+		updated.Address = p.Address.normalized()
+		updated.Extra = p.Extra
+		d.replaceAddressLocked(updated)
+		if isOffice {
+			// The registered office is mirrored on the company: replace the
+			// company too, so GET company and GET .../addresses agree.
+			mirrored := *c
+			office := updated
+			mirrored.Address = &office
+			mirrored.UpdatedAt = now()
+			d.companies[mirrored.ID] = &mirrored
+			if mirrored.ExternalRef != "" {
+				d.companiesByRef[refKey(d.own, mirrored.ExternalRef)] = &mirrored
+			}
+		}
 		d.mu.Unlock()
-		return nil, fmt.Errorf("%w: company %s already has an address with id %q", ErrDuplicate, c.ID, p.ID)
+		d.changed()
+		return &updated, nil
 	}
 	a := &CompanyAddress{
 		ID:        p.ID,
@@ -412,6 +432,15 @@ func (d *Directory) AddAddress(companyID string, p AddressParams) (*CompanyAddre
 	d.mu.Unlock()
 	d.changed()
 	return &cp, nil
+}
+
+// sameExtra reports whether two addresses carry the same extra fields, no
+// fields and an empty set being the same.
+func sameExtra(a, b map[string]any) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // Addresses lists a company's addresses.
@@ -606,12 +635,16 @@ func (d *Directory) CreateExtended(companyID string, p ExtendedParams) (*Extende
 		return nil, fmt.Errorf("%w: company %s already has an extended profile (id %s); it can only be created once and there is no update endpoint",
 			ErrDuplicate, cid, existing.ID)
 	}
-	var unknownDocs, emptyDocs, unknownAddresses, unknownPeople []string
+	var unknownDocs, otherCompanyDocs, emptyDocs, unknownAddresses, unknownPeople []string
 	for _, entry := range p.Documents {
 		doc, ok := d.documents[entry.Document]
 		switch {
 		case !ok || doc.Env != d.own:
 			unknownDocs = append(unknownDocs, entry.Document)
+		case doc.CompanyID != "" && doc.CompanyID != cid:
+			// An upload slot is opened for one company; a POST /uploads
+			// receipt names none and serves any.
+			otherCompanyDocs = append(otherCompanyDocs, entry.Document)
 		case doc.AwaitingBytes:
 			emptyDocs = append(emptyDocs, entry.Document)
 		}
@@ -635,6 +668,9 @@ func (d *Directory) CreateExtended(companyID string, p ExtendedParams) (*Extende
 	case len(unknownDocs) > 0:
 		return nil, fmt.Errorf("%w: documents %s were never uploaded; POST /oversight/v1/uploads first",
 			ErrInvalid, strings.Join(unknownDocs, ", "))
+	case len(otherCompanyDocs) > 0:
+		return nil, fmt.Errorf("%w: documents %s were uploaded for another company, not company %s",
+			ErrInvalid, strings.Join(otherCompanyDocs, ", "), cid)
 	case len(emptyDocs) > 0:
 		return nil, fmt.Errorf("%w: documents %s have an upload slot but no file; PUT the bytes to the slot's url first",
 			ErrInvalid, strings.Join(emptyDocs, ", "))
@@ -747,6 +783,9 @@ func (d *Directory) AddUploadSlot(companyID string, p UploadSlotParams, token st
 		CreatedAt:     now(),
 	}
 	d.documents[doc.ID] = doc
+	if doc.UploadToken != "" {
+		d.uploadsByToken[doc.UploadToken] = doc.ID
+	}
 	cp := *doc
 	d.mu.Unlock()
 	d.changed()
@@ -763,14 +802,8 @@ var ErrUploadRejected = errors.New("b4b: upload rejected")
 // A second PUT of the same bytes is accepted again.
 func (d *Directory) FillUpload(token string, size int64, md5Base64, sha256Hex string) (*Document, error) {
 	d.mu.Lock()
-	var doc *Document
-	for _, candidate := range d.documents {
-		if token != "" && candidate.UploadToken == token {
-			doc = candidate
-			break
-		}
-	}
-	if doc == nil {
+	doc := d.documents[d.uploadsByToken[token]]
+	if token == "" || doc == nil {
 		d.mu.Unlock()
 		return nil, fmt.Errorf("%w: no upload slot for this url", ErrNotFound)
 	}

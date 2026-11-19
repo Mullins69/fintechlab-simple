@@ -70,6 +70,11 @@ always was: `B4B_JWT_KEY_ID` and its key, `B4B_CALLBACK_URL`,
 - **The state file names each record's owner** as `env`, left out for the
   default's. A file written before environments loads as the default's.
   The wire never shows it.
+- **A company from a file written before its inline address had an id**
+  is linked to its `registered` address record on load: the record keeps
+  its id and `created_at` and takes the inline address's fields, the ones
+  a PATCH changed. A company with no such record gets one, under an id
+  derived from the company's, so it is the same after every restart.
 - **Deleting a customer** drops everything its environment made, as an
   `all` reset of it would, with its traps and activity; its key verifies
   nothing after.
@@ -81,11 +86,9 @@ boarding chain walks it: company, addresses, people, extended profile,
 vIBANs, uploads, then beneficiaries and payments.
 
 **Where the boarding shapes come from.** The boarding routes accept, and
-answer with the fields read by, the platform gateway's B4B client (buddy,
-`apps/gateway/src/modules/b4b/` and the chain in
-`apps/gateway/src/modules/lifecycle/orchestrators/lifecycle.orchestrator.ts`,
-`runB4bBoardingChainForApplication`). That client is the one run against
-the real vendor, so where it and this lab's earlier reading of the vendor
+answer with the fields read by, a platform gateway's B4B client and the
+boarding chain that drives it. That client is one run against the real
+vendor, so where it and this lab's earlier reading of the vendor
 docs disagreed, the lab changed. The lab's earlier field names are still
 accepted on the way in (marked *earlier spelling* below), so its own e2e
 suite and older bodies keep working. The gateway walks: `POST /companies`
@@ -177,7 +180,7 @@ Body, as the gateway sends it:
   "legal_name": "Southwind Coffee Ltd",
   "company_type": "kyb",
   "acquirer": "Worldline",
-  "primary_channel": "Infinite Payments",
+  "primary_channel": "Online",
   "merchant_category_code": "5814",
   "company_documents_waived": true,
   "person_documents_waived": true,
@@ -206,7 +209,7 @@ stored, with the id a client names as the extended profile's
   "legal_name": "Southwind Coffee Ltd",
   "company_type": "kyb",
   "acquirer": "Worldline",
-  "primary_channel": "Infinite Payments",
+  "primary_channel": "Online",
   "merchant_category_code": "5814",
   "company_documents_waived": true,
   "person_documents_waived": true,
@@ -256,7 +259,7 @@ again:
   "legal_name": "Southwind Coffee Ltd",
   "company_type": "kyb",
   "acquirer": "Worldline",
-  "primary_channel": "Infinite Payments",
+  "primary_channel": "Online",
   "merchant_category_code": "5814",
   "company_documents_waived": true,
   "person_documents_waived": true
@@ -265,7 +268,9 @@ again:
 
 Every field of the create is accepted, each optional; a `null` leaves the
 field alone. `address` changes the registered office field by field (the
-fields sent replace, the rest stay, its id does not change). The create's
+fields sent replace, even with `""`, which clears `line_2`, `line_3` or
+`region`; the fields not sent stay; its id does not change, and its record
+in `GET …/addresses` changes with it). The create's
 rules apply to what is sent: a blank `legal_name` or a non-four-digit
 `merchant_category_code` is `400`.
 
@@ -300,10 +305,16 @@ Answers `201`:
 The gateway reads `id`: an owner's becomes that person's `address_id`, the
 first outlet's the extended profile's `business_address_id`.
 
-`400` for a missing field, `404` for an unknown company, `422` for an `id`
-the company already has another address under. The same body sent again,
-as a client retrying a create whose answer it lost would, is answered with
-the stored address. Whether the real vendor keeps
+`400` for a missing field, `404` for an unknown company. The same body
+(`type`, fields and extra fields) sent again, as a client retrying a
+create whose answer it lost would, is answered with the stored address. A
+different body under an `id` the company already has, as a re-run chain
+sends after the address was edited, updates that address (type, fields
+and extra fields replaced, id and `created_at` kept) and answers `201`
+with it; when it is the registered office, the company's inline `address`
+changes with it. The registered office keeps its type: its `id` under
+another `type` is `422`. This is the only way to change an address other
+than the registered office. Whether the real vendor keeps
 the client's id or mints its own is not confirmed; the gateway works
 either way, since it stores the id answered.
 
@@ -429,9 +440,11 @@ Rules:
 
 - `documents` is required unless the company has
   `company_documents_waived` (422). Every entry must name an upload of the
-  caller's environment, and an upload slot must have had its bytes PUT
-  (400 otherwise: the gateway's client notes the vendor refuses a signed id
-  with no file behind it).
+  caller's environment, an upload slot must be one opened for this company
+  (`… were uploaded for another company …`), and it must have had its
+  bytes PUT (400 otherwise: the gateway's client notes the vendor refuses a
+  signed id with no file behind it). A `POST /oversight/v1/uploads`
+  receipt names no company and serves any of the environment's.
 - `registered_office_address_id` and `business_address_id` must be
   addresses of this company, and every `ownership_structure` `person_id`
   one of its people (400).
@@ -542,9 +555,11 @@ Answers `201` with the slot, which is all the gateway reads:
 ```
 
 `id` is what the extended profile names as a document. `url` is this
-listener as the caller reached it (`X-Forwarded-Proto` and
-`X-Forwarded-Host` are honoured), so it is reachable from wherever the
-create was. `400` for a missing or malformed field, `404` for an unknown
+listener as the caller reached it (`X-Forwarded-Proto`,
+`X-Forwarded-Host` and `X-Forwarded-Prefix` are honoured: a proxy serving
+b4b under `https://lab.example/b4b` that strips `/b4b` and sends it as
+`X-Forwarded-Prefix` gets `https://lab.example/b4b/direct-uploads/…`), so
+it is reachable from wherever the create was. `400` for a missing or malformed field, `404` for an unknown
 company. Persisted, so a slot survives a restart.
 
 ### `PUT /direct-uploads/{token}`
@@ -771,9 +786,8 @@ default).
 
 Nothing else: no `external_ref`, no `entity_type`, no `company_id`. A client
 correlates on the id the create returned. The gateway's callback schema
-(`callback/dto/b4b-callback.dto.ts`) takes `{id, sanctions_status:
-pass|fail|review, external_ref?}` as a plain `z.object`, which strips an
-undeclared key rather than refusing it: `pep_sanctions_status` arrives and
+takes `{id, sanctions_status: pass|fail|review, external_ref?}` and strips
+an undeclared key rather than refusing it: `pep_sanctions_status` arrives and
 is ignored, so a PEP hit with a clean sanctions status does not hold the
 merchant there.
 

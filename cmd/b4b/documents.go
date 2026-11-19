@@ -111,9 +111,9 @@ func (a *app) uploadDocument(w http.ResponseWriter, r *http.Request) {
 const uploadPath = "/direct-uploads/"
 
 // uploadSlot is the answer to POST /oversight/v1/companies/{id}/uploads,
-// as the gateway reads it (b4b-document-upload.port.ts in buddy): the id an
-// extended profile names as a document, and the URL and headers to PUT the
-// bytes with.
+// as a client that uploads through a slot reads it: the id an extended
+// profile names as a document, and the URL and headers to PUT the bytes
+// with.
 type uploadSlot struct {
 	ID      string            `json:"id"`
 	URL     string            `json:"url"`
@@ -123,8 +123,8 @@ type uploadSlot struct {
 // createUploadSlot opens a slot for one of the company's documents. The
 // body is the file's metadata -- filename, byte_size, checksum (base64
 // MD5), content_type -- and nothing is uploaded until the PUT. The URL
-// names this listener as the caller reached it, so a client behind any
-// base URL gets one it can reach.
+// names this listener as the caller reached it, path prefix included, so a
+// client behind any base URL gets one it can reach.
 func (a *app) createUploadSlot(w http.ResponseWriter, r *http.Request) {
 	var p b4b.UploadSlotParams
 	if _, err := httputilx.ReadJSONExtras(r, &p); err != nil {
@@ -139,7 +139,7 @@ func (a *app) createUploadSlot(w http.ResponseWriter, r *http.Request) {
 	log.Printf("b4b: upload slot %s opened for company %s file=%q bytes=%d", doc.ID, doc.CompanyID, doc.FileName, doc.Size)
 	httputilx.WriteJSON(w, 201, uploadSlot{
 		ID:  doc.ID,
-		URL: requestOrigin(r) + uploadPath + doc.UploadToken,
+		URL: requestBase(r) + uploadPath + doc.UploadToken,
 		Headers: map[string]string{
 			"Content-Type": doc.ContentType,
 			"Content-MD5":  doc.Checksum,
@@ -148,7 +148,7 @@ func (a *app) createUploadSlot(w http.ResponseWriter, r *http.Request) {
 }
 
 // receiveUpload is the presigned PUT. It answers 200 with an empty body,
-// which is the only answer the gateway takes as success; 403 for a URL no
+// which is the only answer a slot client may take as success; 403 for a URL no
 // slot has, as storage refuses a signature it cannot match; 400 when the bytes are not the size or MD5 the slot declared.
 // The bytes are measured and discarded, as on POST /uploads.
 func (a *app) receiveUpload(w http.ResponseWriter, r *http.Request) {
@@ -165,7 +165,7 @@ func (a *app) receiveUpload(w http.ResponseWriter, r *http.Request) {
 		status := 400
 		if errors.Is(err, b4b.ErrNotFound) {
 			// What storage answers a presigned URL it cannot honour, and
-			// what the gateway reads as a slot gone stale.
+			// what a slot client reads as a slot gone stale.
 			status = 403
 		}
 		httputilx.Error(w, status, err.Error())
@@ -175,9 +175,12 @@ func (a *app) receiveUpload(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// requestOrigin is the scheme and host the caller reached this listener
-// at, preferring what a proxy in front says.
-func requestOrigin(r *http.Request) string {
+// requestBase is the base URL the caller reached this listener at:
+// scheme, host and path prefix, preferring what a proxy in front says. A
+// proxy that serves b4b under a path (https://lab.example/b4b) and strips
+// it on the way in names it in X-Forwarded-Prefix; without one there is no
+// prefix, since this listener's routes sit at the root.
+func requestBase(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
 		scheme = "https"
@@ -186,7 +189,12 @@ func requestOrigin(r *http.Request) string {
 	if host == "" {
 		host = r.Host
 	}
-	return scheme + "://" + host
+	prefix, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Prefix"), ",")
+	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	if prefix != "" {
+		prefix = "/" + prefix
+	}
+	return scheme + "://" + host + prefix
 }
 
 func uploadToken() string {

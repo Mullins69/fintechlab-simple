@@ -365,3 +365,152 @@ func TestAddressTakesTheEarlierSpellingsAndAnswersTheGateways(t *testing.T) {
 		t.Fatalf("with both spellings sent, line_1 = %q, want the gateway's", both.Line1)
 	}
 }
+
+// A boarding chain re-run after an address was edited sends the new data
+// under the address's id: that updates the address, and the registered
+// office's mirror on the company with it. The same body again answers the
+// stored address.
+func TestAnAddressCreateUnderAKnownIDUpdatesIt(t *testing.T) {
+	d := NewDirectory(nil)
+	p := gbCompany()
+	p.Address.ID = "office-1"
+	c, err := d.CreateCompany(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	business := AddressParams{ID: "biz-1", Type: "business", Address: Address{Line1: "2 High Street", City: "Leeds", Country: "GB"}}
+	first, err := d.AddAddress(c.ID, business)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again, err := d.AddAddress(c.ID, business); err != nil || again.Line1 != "2 High Street" {
+		t.Fatalf("identical retry = %+v, %v; want the stored address", again, err)
+	}
+
+	business.Line1 = "4 High Street"
+	updated, err := d.AddAddress(c.ID, business)
+	if err != nil {
+		t.Fatalf("a changed body under a known id: %v", err)
+	}
+	if updated.ID != "biz-1" || updated.Line1 != "4 High Street" || updated.CreatedAt != first.CreatedAt {
+		t.Fatalf("updated = %+v, want biz-1 at 4 High Street, created when first posted", updated)
+	}
+
+	office := AddressParams{ID: "office-1", Type: defaultInlineAddressType, Address: Address{Line1: "9 New Way", City: "London", Country: "GB"}}
+	if _, err := d.AddAddress(c.ID, office); err != nil {
+		t.Fatalf("a changed registered office under its id: %v", err)
+	}
+	stored, _ := d.Addresses(c.ID)
+	lines := map[string]string{}
+	for _, a := range stored {
+		lines[a.ID] = a.Line1
+	}
+	if len(stored) != 2 || lines["biz-1"] != "4 High Street" || lines["office-1"] != "9 New Way" {
+		t.Fatalf("addresses = %v, want both updated in place", lines)
+	}
+	read, _ := d.Company(c.ID)
+	if read.Address.ID != "office-1" || read.Address.Line1 != "9 New Way" {
+		t.Fatalf("company address = %+v, want the updated registered office", read.Address)
+	}
+}
+
+// A PATCH tells a field sent as "" (cleared) from one not sent (kept).
+func TestAPatchedAddressClearsAFieldSentEmpty(t *testing.T) {
+	d := NewDirectory(nil)
+	p := gbCompany()
+	p.Address.Line2 = "Unit 2"
+	p.Address.Region = "Greater London"
+	c, err := d.CreateCompany(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := ""
+	got, err := d.UpdateCompany(c.ID, CompanyPatch{Address: &AddressPatch{Line2: &empty}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Address.Line2 != "" || got.Address.AddressLine2 != "" {
+		t.Fatalf("address = %+v, want line_2 cleared in both spellings", got.Address.Address)
+	}
+	if got.Address.Region != "Greater London" || got.Address.Line1 != "1 Simulation Way" {
+		t.Fatalf("address = %+v, want the fields not sent kept", got.Address.Address)
+	}
+	list, _ := d.Addresses(c.ID)
+	if len(list) != 1 || list[0].Line2 != "" {
+		t.Fatalf("addresses = %+v, want the registered office's record cleared too", list)
+	}
+}
+
+// An upload slot is opened for one company; another company's profile
+// cannot name it.
+func TestExtendedProfileRefusesAnotherCompanysUploadSlot(t *testing.T) {
+	d := NewDirectory(nil)
+	mine, _ := d.CreateCompany(gbCompany())
+	other := gbCompany()
+	other.ExternalRef = "mer_0002"
+	theirs, _ := d.CreateCompany(other)
+
+	slot, err := d.AddUploadSlot(theirs.ID, UploadSlotParams{Filename: "x.pdf", ByteSize: 3, Checksum: "rL0Y20zC+Fzt72VPzMSk2A==", ContentType: "application/pdf"}, "tok-1", 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.FillUpload("tok-1", 3, "rL0Y20zC+Fzt72VPzMSk2A==", "x"); err != nil {
+		t.Fatal(err)
+	}
+	_, err = d.CreateExtended(mine.ID, ExtendedParams{Documents: []ExtendedDocument{{Document: slot.ID}}})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "another company") {
+		t.Fatalf("err = %v, want ErrInvalid naming another company's upload", err)
+	}
+	if _, err := d.CreateExtended(theirs.ID, ExtendedParams{Documents: []ExtendedDocument{{Document: slot.ID}}}); err != nil {
+		t.Fatalf("the slot's own company: %v", err)
+	}
+}
+
+// The registered office's id cannot be reposted as another type: the
+// company's inline address would stop being its registered office.
+func TestTheRegisteredOfficeKeepsItsTypeOnARepost(t *testing.T) {
+	d := NewDirectory(nil)
+	p := gbCompany()
+	p.Address.ID = "office-1"
+	c, err := d.CreateCompany(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trading := AddressParams{ID: "office-1", Type: "trading", Address: Address{Line1: "9 New Way", City: "London", Country: "GB"}}
+	if _, err := d.AddAddress(c.ID, trading); !errors.Is(err, ErrDuplicate) {
+		t.Fatalf("err = %v, want ErrDuplicate for the registered office reposted as trading", err)
+	}
+	read, _ := d.Company(c.ID)
+	if read.Address.Type != defaultInlineAddressType || read.Address.Line1 != "1 Simulation Way" {
+		t.Fatalf("company address = %+v, want the registered office unchanged", read.Address)
+	}
+	list, _ := d.Addresses(c.ID)
+	if len(list) != 1 || list[0].Type != defaultInlineAddressType {
+		t.Fatalf("addresses = %+v, want the one registered office", list)
+	}
+}
+
+// A repost that changes only extra updates the address's extra.
+func TestAnAddressRepostChangingOnlyExtraUpdatesIt(t *testing.T) {
+	d := NewDirectory(nil)
+	c, _ := d.CreateCompany(gbCompany())
+	business := AddressParams{ID: "biz-1", Type: "business", Address: Address{Line1: "2 High Street", City: "Leeds", Country: "GB"},
+		Extra: map[string]any{"label": "front"}}
+	if _, err := d.AddAddress(c.ID, business); err != nil {
+		t.Fatal(err)
+	}
+	business.Extra = map[string]any{"label": "back"}
+	got, err := d.AddAddress(c.ID, business)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Extra["label"] != "back" {
+		t.Fatalf("answer extra = %v, want the new label", got.Extra)
+	}
+	list, _ := d.Addresses(c.ID)
+	for _, a := range list {
+		if a.ID == "biz-1" && a.Extra["label"] != "back" {
+			t.Fatalf("stored extra = %v, want the new label", a.Extra)
+		}
+	}
+}

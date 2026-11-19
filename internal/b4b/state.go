@@ -2,6 +2,7 @@ package b4b
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -146,6 +147,9 @@ func (d *Directory) Restore(s State) {
 		a.Address = a.Address.normalized()
 		d.addresses[a.CompanyID] = append(d.addresses[a.CompanyID], a)
 	}
+	for _, c := range s.Companies {
+		d.linkLegacyOfficeLocked(c)
+	}
 	for _, p := range s.People {
 		if p.Address != nil {
 			normalized := p.Address.normalized()
@@ -160,10 +164,53 @@ func (d *Directory) Restore(s State) {
 	for _, doc := range s.Documents {
 		doc.Env = owner(doc.Env)
 		d.documents[doc.ID] = doc
+		if doc.UploadToken != "" {
+			d.uploadsByToken[doc.UploadToken] = doc.ID
+		}
 	}
 	for _, v := range s.Vibans {
 		d.vibans[v.CompanyID] = append(d.vibans[v.CompanyID], v)
 	}
+}
+
+// linkLegacyOfficeLocked ties a company restored from a file written
+// before its inline address carried an id to the registered record its
+// create stored beside it, so a later change to one reaches the other.
+// The inline address wins: a PATCH then changed only it, so the record
+// keeps its id and created_at but takes the inline address's fields. A
+// company with no such record gets one, under an id derived from the
+// company's, so a restart before the next write finds the same one.
+// Callers hold d.mu.
+func (d *directory) linkLegacyOfficeLocked(c *Company) {
+	if c.Address == nil || c.Address.ID != "" {
+		return
+	}
+	var record *CompanyAddress
+	for _, a := range d.addresses[c.ID] {
+		if a.Type == defaultInlineAddressType {
+			record = a
+			break
+		}
+	}
+	if record == nil {
+		record = &CompanyAddress{
+			ID:        legacyOfficeID(c.ID),
+			CompanyID: c.ID,
+			Type:      defaultInlineAddressType,
+			CreatedAt: c.CreatedAt,
+		}
+		d.addresses[c.ID] = append(d.addresses[c.ID], record)
+	}
+	record.Address = c.Address.Address
+	office := *record
+	c.Address = &office
+}
+
+// legacyOfficeID is the id of the registered record made for a restored
+// company that had none: adr_ and twelve hex digits, as minted ids are.
+func legacyOfficeID(companyID string) string {
+	sum := sha256.Sum256([]byte("registered-office:" + companyID))
+	return "adr_" + hex.EncodeToString(sum[:6])
 }
 
 // Snapshot copies registered beneficiaries out. Auto-vivified ones are not

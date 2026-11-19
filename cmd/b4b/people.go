@@ -93,11 +93,10 @@ func (a *app) setPersonSanctions(w http.ResponseWriter, r *http.Request) {
 }
 
 // personCallback is the documented person callback body: the id B4B minted
-// and the two screening statuses. Nothing else. The gateway's callback
-// schema (apps/gateway/src/modules/b4b/callback/dto/b4b-callback.dto.ts in
-// buddy) reads {id, sanctions_status, external_ref?} and is a plain
-// z.object, which strips a key it does not declare rather than refusing
-// it: pep_sanctions_status reaches it and is ignored.
+// and the two screening statuses. Nothing else. A client whose callback
+// schema reads {id, sanctions_status, external_ref?} and strips a key it
+// does not declare, rather than refusing it, takes this body:
+// pep_sanctions_status reaches it and is ignored.
 //
 // No external_ref, and no entity type -- deliberately, because the real one
 // has neither. A client that attached its own reference to a person, or

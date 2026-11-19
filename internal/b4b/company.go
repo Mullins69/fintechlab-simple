@@ -41,10 +41,8 @@ const (
 // registered office, the body of POST /companies/{id}/addresses, and a
 // person's own address.
 //
-// The wire names are the platform gateway's B4B client's (line_1, postcode;
-// apps/gateway/src/modules/b4b/b4b-company.service.ts and
-// b4b-entity.service.ts in buddy), because that client is the one run
-// against the real vendor. This lab's first reading of the vendor docs
+// The wire names are those of a platform gateway's B4B client (line_1,
+// postcode), because that client is one run against the real vendor. This lab's first reading of the vendor docs
 // spelled them address_line_1 and postal_code; those are still accepted on
 // the way in, so a body or a state file written in them keeps working, and
 // answers carry both spellings, so a client reading either keeps working.
@@ -488,9 +486,51 @@ type CompanyPatch struct {
 	CompanyDocumentsWaived *bool   `json:"company_documents_waived"`
 	PersonDocumentsWaived  *bool   `json:"person_documents_waived"`
 	// Address changes the registered office: each field sent replaces
-	// that field, the rest stay.
-	Address *Address       `json:"address"`
+	// that field, the rest stay, and a field sent as "" clears it.
+	Address *AddressPatch  `json:"address"`
 	Extra   map[string]any `json:"-"`
+}
+
+// AddressPatch is a PATCH's address: a nil field was not sent and keeps
+// its value; a sent one, even "", replaces it. The earlier spellings are
+// taken too, a value under the current name winning.
+type AddressPatch struct {
+	Line1    *string `json:"line_1"`
+	Line2    *string `json:"line_2"`
+	Line3    *string `json:"line_3"`
+	City     *string `json:"city"`
+	Region   *string `json:"region"`
+	Postcode *string `json:"postcode"`
+	Country  *string `json:"country"`
+
+	AddressLine1 *string `json:"address_line_1"`
+	AddressLine2 *string `json:"address_line_2"`
+	PostalCode   *string `json:"postal_code"`
+}
+
+// applyTo is current with every field the patch sent in its place.
+func (p AddressPatch) applyTo(current Address) Address {
+	setString(&current.Line1, firstSent(p.Line1, p.AddressLine1))
+	setString(&current.Line2, firstSent(p.Line2, p.AddressLine2))
+	setString(&current.Line3, p.Line3)
+	setString(&current.City, p.City)
+	setString(&current.Region, p.Region)
+	setString(&current.Postcode, firstSent(p.Postcode, p.PostalCode))
+	setString(&current.Country, p.Country)
+	// normalized refills an emptied field from its earlier spelling, so
+	// both spellings take the new value.
+	current.AddressLine1, current.AddressLine2, current.PostalCode = current.Line1, current.Line2, current.Postcode
+	return current
+}
+
+// firstSent is the first of values that was sent, or nil.
+func firstSent(values ...*string) *string {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
 }
 
 // Validate applies the create's rules to the fields sent.
