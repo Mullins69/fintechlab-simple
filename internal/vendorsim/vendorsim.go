@@ -27,6 +27,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -277,14 +278,25 @@ type outcomeReq struct {
 	Outcome string `json:"outcome"`
 }
 
-func (s *Sim) setOutcome(w http.ResponseWriter, r *http.Request) {
+// OneEnv is the one environment a control call names, for a hook that acts
+// in one: a 400 for *, saying what is done in one environment ("an outcome
+// is set"), and a 404 for one this sim was never given, both written to w.
+func (s *Sim) OneEnv(w http.ResponseWriter, r *http.Request, done string) (string, bool) {
 	env := tenant.FromRequest(r)
 	switch {
 	case env == tenant.All:
-		httputilx.Error(w, 400, "an outcome is set in one environment, not in all of them")
-		return
+		httputilx.Error(w, 400, done+" in one environment, not in all of them")
+		return "", false
 	case !s.Known(env):
 		httputilx.Error(w, 404, "no environment "+env+" at "+s.cfg.Service)
+		return "", false
+	}
+	return env, true
+}
+
+func (s *Sim) setOutcome(w http.ResponseWriter, r *http.Request) {
+	env, ok := s.OneEnv(w, r, "an outcome is set")
+	if !ok {
 		return
 	}
 	var req outcomeReq
@@ -475,10 +487,20 @@ func (s *Sim) envOfCredentials(r *http.Request) string {
 	return tenant.Default
 }
 
-// Str is v as a string, or "".
+// Str is v as a string, or "". Credentials are read with it, so a number
+// is not one.
 func Str(v any) string {
 	str, _ := v.(string)
 	return str
+}
+
+// StrOrNumber is v as a string, a JSON number as one ("11" for 11), or "":
+// for vendor fields that clients send either way, such as KYC6's review ids.
+func StrOrNumber(v any) string {
+	if number, ok := v.(float64); ok {
+		return strconv.FormatFloat(number, 'f', -1, 64)
+	}
+	return Str(v)
 }
 
 func logReq(next http.Handler) http.Handler {

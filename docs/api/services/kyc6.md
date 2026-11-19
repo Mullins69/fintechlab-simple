@@ -49,8 +49,12 @@ here, pushed by the lab API with
 
 What the platform's KYC6 client calls. Errors this service writes
 have one shape, `{"error": "<message>", "status": <code>}`. Request bodies
-are decoded loosely: malformed JSON is read as an empty object rather than
-refused, and only the fields named per route are read.
+are decoded loosely: only the fields named per route are read. A screen's
+malformed JSON is read as an empty object rather than refused; on the
+monitoring routes, a body that is not one JSON value of the route's
+shape (empty, cut short, an array, an address that is not an object, or
+anything after the value) is a `400` with the decoder's error, as at
+KYC6, and changes nothing.
 
 | Check | Default | Moves |
 | --- | --- | --- |
@@ -113,7 +117,9 @@ monitor records, and reads back the matches KYC6's re-screening finds
 against them; a reviewer's decision goes back as a review, which closes
 the match. Each environment has its own worklists. They live in memory: a
 restart loses them, and a flow reset keeps the worklists but clears
-their records ([`POST /sim/reset`](#post-simreset)).
+their records ([`POST /sim/reset`](#post-simreset)). Enrolling a record on
+a worklist the environment does not have creates it, with no settings, so
+the platform's enrolments still answer after a restart or an `all` reset.
 
 The lab does not re-screen. A record has no match until a test puts one
 on it with
@@ -185,7 +191,8 @@ unknown one.
 ### `GET /kyc6/worklists/{worklistId}/matches`
 
 Every open match on the worklist, businesses' and individuals' alike,
-oldest first. **Not confirmed as a KYC6 route**: it answers in the shape the
+oldest first; matches found at the same moment by kind (businesses
+first), record id, and the order they were put on the record. **Not confirmed as a KYC6 route**: it answers in the shape the
 platform's poll reads, and only with open matches, so a match stops being
 reported once it is reviewed.
 
@@ -207,8 +214,10 @@ Body: `{"name": "Southwind Coffee Ltd", "addresses": [{"geography": "GB"}]}`.
 
 Answers `200` with the record, as
 [`GET /kyc6/worklists/{worklistId}/businesses`](#get-kyc6worklistsworklistidbusinesses)
-lists it, and `monitorRecordId` and `worklistId`. `404` for an unknown
-worklist.
+lists it, and `monitorRecordId` and `worklistId`. A worklist the
+environment does not have is created, with no settings: the platform
+creates its worklist once, at customer setup, and the lab's does not
+survive a restart or an `all` reset.
 
 ### `GET /kyc6/worklists/{worklistId}/businesses`
 
@@ -280,7 +289,8 @@ neither, and `404` when the record has no match with its `qrCode`.
 batch `warn`, `1 of 2 refused`. `400` for the whole call when `reviews` is
 missing or empty; `404` for an unknown worklist or record. Every entry,
 refused or not, is kept for
-[`GET /sim/kyc6/worklists/{worklistId}/businesses/{recordId}`](#get-simkyc6worklistsworklistidbusinessesrecordid).
+[`GET /sim/kyc6/worklists/{worklistId}/businesses/{recordId}`](#get-simkyc6worklistsworklistidbusinessesrecordid),
+the newest 256 per record, as many as the journal keeps calls.
 
 ### `PUT /kyc6/worklists/{worklistId}/businesses/{recordId}/matches/auto-reviews`
 
@@ -403,9 +413,13 @@ optional, and an empty body is the defaults:
 | `resourceId` | `sim-om-<n>`, numbered per environment |
 | `qrCode` | `sim-qr-<n>` |
 
+A number whose `sim-om-<n>` or `sim-qr-<n>` a match in the environment
+already has, because a test gave it, is skipped.
+
 A `resourceId` the record already has a match for is that profile
 changing: the match takes the fields given, its `matchVersion` goes up by
-one, and it is open again. A `qrCode` the record holds an auto-review for
+one, and it is open again. A field not given keeps its value; `[]` for
+`datasets` or `countries` empties it. A `qrCode` the record holds an auto-review for
 arrives closed by it.
 
 Answers `201` with the new match, `200` for one moved on a version, as
@@ -432,8 +446,9 @@ One business record and what the platform sent for it, in the environment
 the call names (`*` is a 400): the record as
 [`GET /kyc6/worklists/{worklistId}/businesses`](#get-kyc6worklistsworklistidbusinesses)
 lists it, its `matches` as the vendor shows them, the `autoReviews` it
-holds, and `reviews`, every review and auto-review entry it was sent, in
-order, with the answer each was given:
+holds, by qrCode within one batch, and `reviews`, every review and
+auto-review entry it was sent, in order, the newest 256, with the answer
+each was given:
 
 ```json
 {"env": "default", "worklistId": "7", "kind": "businesses",

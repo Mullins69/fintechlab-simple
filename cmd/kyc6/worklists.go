@@ -12,6 +12,7 @@ package main
 // contract and which are the lab's reading of it.
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,13 +20,13 @@ import (
 	"log"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/webduvet/fintechlab-simple/internal/activity"
 	"github.com/webduvet/fintechlab-simple/internal/httputilx"
 	"github.com/webduvet/fintechlab-simple/internal/tenant"
+	"github.com/webduvet/fintechlab-simple/internal/vendorsim"
 )
 
 const (
@@ -48,6 +49,10 @@ const (
 	reviewExistsMessage = "Auto review already exists"
 
 	defaultMatchScore = 92
+
+	// reviewsKept is how many review entries a record keeps for the lab's
+	// read, the newest: as many as the journal keeps calls.
+	reviewsKept = activity.DefaultCapacity
 )
 
 var defaultMatchDatasets = []string{"SAN-CURRENT"}
@@ -80,8 +85,8 @@ type record struct {
 	// autoReviews are the auto-reviews the record holds, by qrCode: one
 	// closes the match with that qrCode now, or as soon as it appears.
 	autoReviews map[string]*review
-	// reviews is every review entry sent for the record, in order, with the
-	// answer it was given.
+	// reviews are the review entries sent for the record, in order, with the
+	// answer each was given: the newest reviewsKept of them.
 	reviews []*review
 }
 
@@ -224,9 +229,13 @@ func emptyRecords() map[string]map[string]*record {
 // exists and keeps its records.
 func (a *app) putWorklist(w http.ResponseWriter, r *http.Request) {
 	var settings map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&settings)
+	if err := decodeBody(r, &settings); err != nil {
+		httputilx.Error(w, 400, err.Error())
+		return
+	}
 	if settings == nil {
-		settings = map[string]any{}
+		httputilx.Error(w, 400, "the worklist's settings must be a JSON object")
+		return
 	}
 	id := r.PathValue("worklistId")
 	now := time.Now().UTC()
@@ -290,13 +299,14 @@ func (wl *worklist) view() map[string]any {
 func openMatches(records map[string]*record) int {
 	n := 0
 	for _, rec := range records {
-		n += rec.count(matchOpen)
+		n += rec.tally()[matchOpen]
 	}
 	return n
 }
 
 // worklistMatches is every open match on the worklist, businesses' and
-// individuals' alike, in the order they were found.
+// individuals' alike, in the order they were found; matches found at the
+// same moment by kind, record id and the order they were put on the record.
 func (a *app) worklistMatches(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("worklistId")
 	a.mu.Lock()
@@ -312,7 +322,7 @@ func (a *app) worklistMatches(w http.ResponseWriter, r *http.Request) {
 	}
 	var open []found
 	for _, kind := range recordKinds {
-		for _, rec := range wl.records[kind] {
+		for _, rec := range sortedRecords(wl.records[kind]) {
 			for _, m := range rec.matches {
 				if m.status == matchOpen {
 					open = append(open, found{rec, m})
@@ -320,7 +330,7 @@ func (a *app) worklistMatches(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	sort.Slice(open, func(i, j int) bool { return open[i].m.created.Before(open[j].m.created) })
+	sort.SliceStable(open, func(i, j int) bool { return open[i].m.created.Before(open[j].m.created) })
 	matches := []map[string]any{}
 	for _, f := range open {
 		matches = append(matches, map[string]any{
@@ -345,11 +355,16 @@ type recordBody struct {
 }
 
 // putRecord enrols a business or an individual, or updates one already
-// enrolled and keeps its matches.
+// enrolled and keeps its matches. A worklist the environment does not have
+// is created, with no settings: the platform creates its worklist once, at
+// customer setup, and the lab loses it on a restart or an all reset.
 func (a *app) putRecord(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body recordBody
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := decodeBody(r, &body); err != nil {
+			httputilx.Error(w, 400, err.Error())
+			return
+		}
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
 		if strings.TrimSpace(body.Name) == "" {
 			httputilx.Error(w, 400, "name is required")
@@ -358,10 +373,11 @@ func (a *app) putRecord(kind string) http.HandlerFunc {
 		now := time.Now().UTC()
 		a.mu.Lock()
 		defer a.mu.Unlock()
-		wl := a.monitorIn(tenant.Of(r.Context())).worklists[worklistID]
+		m := a.monitorIn(tenant.Of(r.Context()))
+		wl := m.worklists[worklistID]
 		if wl == nil {
-			httputilx.Error(w, 404, "no worklist "+worklistID)
-			return
+			wl = &worklist{id: worklistID, settings: map[string]any{}, created: now, updated: now, records: emptyRecords()}
+			m.worklists[worklistID] = wl
 		}
 		rec := wl.records[kind][recordID]
 		if rec == nil {
@@ -369,7 +385,7 @@ func (a *app) putRecord(kind string) http.HandlerFunc {
 			wl.records[kind][recordID] = rec
 		}
 		rec.name, rec.dob, rec.addresses, rec.updated = body.Name, body.DOB, body.Addresses, now
-		out := rec.view()
+		out := rec.view(rec.tally())
 		out["monitorRecordId"] = recordID
 		out["worklistId"] = worklistID
 		httputilx.WriteJSON(w, 200, out)
@@ -414,14 +430,16 @@ func (a *app) listRecords(kind string) http.HandlerFunc {
 		listed := []map[string]any{}
 		openRecords, open, truePositive, falsePositive := 0, 0, 0, 0
 		for _, rec := range records {
-			open += rec.count(matchOpen)
-			truePositive += rec.count(matchTruePositive)
-			falsePositive += rec.count(matchFalsePositive)
-			if rec.status() == recordOpen {
+			counts := rec.tally()
+			open += counts[matchOpen]
+			truePositive += counts[matchTruePositive]
+			falsePositive += counts[matchFalsePositive]
+			recStatus := recordStatus(counts)
+			if recStatus == recordOpen {
 				openRecords++
 			}
-			if status == "" || rec.status() == status {
-				listed = append(listed, rec.view())
+			if status == "" || recStatus == status {
+				listed = append(listed, rec.view(counts))
 			}
 		}
 		httputilx.WriteJSON(w, 200, map[string]any{
@@ -445,25 +463,25 @@ func sortedRecords(records map[string]*record) []*record {
 	return out
 }
 
-func (rec *record) count(status string) int {
-	n := 0
+// tally is how many of the record's matches are in each match status.
+func (rec *record) tally() map[string]int {
+	counts := map[string]int{}
 	for _, m := range rec.matches {
-		if m.status == status {
-			n++
-		}
+		counts[m.status]++
 	}
-	return n
+	return counts
 }
 
-func (rec *record) status() string {
-	if rec.count(matchOpen) > 0 {
+// recordStatus is open while a record's tally has an open match.
+func recordStatus(counts map[string]int) string {
+	if counts[matchOpen] > 0 {
 		return recordOpen
 	}
 	return recordClosed
 }
 
-// view is the record as KYC6 lists it.
-func (rec *record) view() map[string]any {
+// view is the record as KYC6 lists it; counts is its tally.
+func (rec *record) view(counts map[string]int) map[string]any {
 	addresses := rec.addresses
 	if addresses == nil {
 		addresses = []map[string]any{}
@@ -494,11 +512,11 @@ func (rec *record) view() map[string]any {
 		"name":                   rec.name,
 		"countries":              countries,
 		"addresses":              addresses,
-		"openCount":              rec.count(matchOpen),
-		"truePositiveCount":      rec.count(matchTruePositive),
-		"falsePositiveCount":     rec.count(matchFalsePositive),
+		"openCount":              counts[matchOpen],
+		"truePositiveCount":      counts[matchTruePositive],
+		"falsePositiveCount":     counts[matchFalsePositive],
 		"discardedCount":         0,
-		"status":                 rec.status(),
+		"status":                 recordStatus(counts),
 		"openDatasets":           openDatasets,
 		"createdDateTimeISO":     iso(rec.created),
 		"lastUpdatedDateTimeISO": iso(rec.updated),
@@ -586,7 +604,10 @@ func (a *app) reviewMatches(kind, endpoint string) http.HandlerFunc {
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := decodeBody(r, &body); err != nil {
+			httputilx.Error(w, 400, err.Error())
+			return
+		}
 		entries, _ := body[field].([]any)
 		if len(entries) == 0 {
 			httputilx.Error(w, 400, field+" is required: a list of at least one entry")
@@ -601,19 +622,29 @@ func (a *app) reviewMatches(kind, endpoint string) http.HandlerFunc {
 			return
 		}
 		results := []map[string]any{}
-		hasErrors := false
+		refused := 0
 		for _, entry := range entries {
 			rv := newReview(endpoint, entry, now)
 			rec.apply(rv)
 			rec.reviews = append(rec.reviews, rv)
 			result := map[string]any{"referenceId": rv.ReferenceID, "statusCode": rv.StatusCode}
 			if rv.Error != nil {
-				hasErrors = true
+				refused++
 				result["error"] = rv.Error
 			}
 			results = append(results, result)
 		}
+		if len(rec.reviews) > reviewsKept {
+			// A copy, so the older reviews are not kept alive by the array.
+			rec.reviews = append([]*review(nil), rec.reviews[len(rec.reviews)-reviewsKept:]...)
+		}
 		rec.updated = now
+		hasErrors := refused > 0
+		if hasErrors {
+			// KYC6 answers such a batch 200 all the same; the journal marks
+			// it a warning.
+			activity.Refuse(r.Context(), fmt.Sprintf("%d of %d refused", refused, len(entries)))
+		}
 		httputilx.WriteJSON(w, 200, map[string]any{"hasErrors": hasErrors, "results": results})
 	}
 }
@@ -622,26 +653,14 @@ func newReview(endpoint string, entry any, at time.Time) *review {
 	fields, _ := entry.(map[string]any)
 	return &review{
 		Endpoint:      endpoint,
-		QRCode:        str(fields["qrCode"]),
-		ReferenceID:   str(fields["referenceId"]),
-		Status:        str(fields["status"]),
-		ClientComment: str(fields["clientComment"]),
-		ClientUserID:  str(fields["clientUserId"]),
+		QRCode:        vendorsim.StrOrNumber(fields["qrCode"]),
+		ReferenceID:   vendorsim.StrOrNumber(fields["referenceId"]),
+		Status:        vendorsim.StrOrNumber(fields["status"]),
+		ClientComment: vendorsim.StrOrNumber(fields["clientComment"]),
+		ClientUserID:  vendorsim.StrOrNumber(fields["clientUserId"]),
 		MatchVersion:  fields["matchVersion"],
 		At:            at,
 	}
-}
-
-// str is a string or a number as a string: KYC6 echoes a referenceId
-// whichever it was sent as.
-func str(v any) string {
-	switch value := v.(type) {
-	case string:
-		return value
-	case float64:
-		return strconv.FormatFloat(value, 'f', -1, 64)
-	}
-	return ""
 }
 
 // apply rules on one review entry and records the ruling on it.
@@ -700,8 +719,10 @@ type armBody struct {
 	QRCode     string   `json:"qrCode"`
 	Name       string   `json:"name"`
 	Score      *float64 `json:"score"`
-	Datasets   []string `json:"datasets"`
-	Countries  []string `json:"countries"`
+	// Datasets and Countries are nil when not given: a re-arm keeps them.
+	// [] clears them.
+	Datasets  []string `json:"datasets"`
+	Countries []string `json:"countries"`
 }
 
 // armMatch is POST /sim/kyc6/worklists/{worklistId}/{kind}/{recordId}/matches:
@@ -710,13 +731,8 @@ type armBody struct {
 // the fields given, its version moves on and it is open again.
 func (a *app) armMatch(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		env := tenant.FromRequest(r)
-		switch {
-		case env == tenant.All:
-			httputilx.Error(w, 400, "a match is put on a record in one environment, not in all of them")
-			return
-		case !a.sim.Known(env):
-			httputilx.Error(w, 404, "no environment "+env+" at kyc6")
+		env, ok := a.sim.OneEnv(w, r, "a match is put on a record")
+		if !ok {
 			return
 		}
 		var body armBody
@@ -763,18 +779,18 @@ func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool
 		for _, existing := range rec.matches {
 			if existing.resourceID == body.ResourceID {
 				found = existing
+				break
 			}
 		}
 	}
 	created := found == nil
 	if created {
-		m.matchesArmed++
-		n := m.matchesArmed
+		n := m.nextFreeNumber()
 		found = &match{
 			id:         fmt.Sprintf("sim-om-match-%d", n),
-			resourceID: firstNonEmpty(body.ResourceID, fmt.Sprintf("sim-om-%d", n)),
-			qrCode:     firstNonEmpty(body.QRCode, fmt.Sprintf("sim-qr-%d", n)),
-			name:       firstNonEmpty(body.Name, rec.name),
+			resourceID: cmp.Or(body.ResourceID, fmt.Sprintf("sim-om-%d", n)),
+			qrCode:     cmp.Or(body.QRCode, fmt.Sprintf("sim-qr-%d", n)),
+			name:       cmp.Or(body.Name, rec.name),
 			score:      defaultMatchScore,
 			datasets:   defaultMatchDatasets,
 			countries:  []string{},
@@ -792,7 +808,7 @@ func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool
 	if body.Score != nil {
 		found.score = *body.Score
 	}
-	if len(body.Datasets) > 0 {
+	if body.Datasets != nil {
 		found.datasets = body.Datasets
 	}
 	if body.Countries != nil {
@@ -808,13 +824,34 @@ func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool
 	return found, created
 }
 
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
+// nextFreeNumber moves the environment's match count on to the next n
+// whose sim-om-<n> and sim-qr-<n> no match in the environment has: a test
+// may have given either to a match it armed.
+func (m *monitorEnv) nextFreeNumber() int {
+	for {
+		m.matchesArmed++
+		n := m.matchesArmed
+		if !m.used(fmt.Sprintf("sim-om-%d", n)) && !m.used(fmt.Sprintf("sim-qr-%d", n)) {
+			return n
 		}
 	}
-	return ""
+}
+
+// used reports whether a match in the environment has value as its
+// resourceId or its qrCode.
+func (m *monitorEnv) used(value string) bool {
+	for _, wl := range m.worklists {
+		for _, kind := range recordKinds {
+			for _, rec := range wl.records[kind] {
+				for _, existing := range rec.matches {
+					if existing.resourceID == value || existing.qrCode == value {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 // readRecord is GET /sim/kyc6/worklists/{worklistId}/{kind}/{recordId}: the
@@ -822,13 +859,8 @@ func firstNonEmpty(values ...string) string {
 // review entry sent for it, with the answer each was given.
 func (a *app) readRecord(kind string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		env := tenant.FromRequest(r)
-		switch {
-		case env == tenant.All:
-			httputilx.Error(w, 400, "a record is read in one environment, not in all of them")
-			return
-		case !a.sim.Known(env):
-			httputilx.Error(w, 404, "no environment "+env+" at kyc6")
+		env, ok := a.sim.OneEnv(w, r, "a record is read")
+		if !ok {
 			return
 		}
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
@@ -846,13 +878,18 @@ func (a *app) readRecord(kind string) http.HandlerFunc {
 }
 
 func (rec *record) labView() map[string]any {
-	out := rec.view()
+	out := rec.view(rec.tally())
 	out["matches"] = rec.matchViews()
 	autoReviews := []*review{}
 	for _, rv := range rec.autoReviews {
 		autoReviews = append(autoReviews, rv)
 	}
-	sort.Slice(autoReviews, func(i, j int) bool { return autoReviews[i].At.Before(autoReviews[j].At) })
+	sort.Slice(autoReviews, func(i, j int) bool {
+		if !autoReviews[i].At.Equal(autoReviews[j].At) {
+			return autoReviews[i].At.Before(autoReviews[j].At)
+		}
+		return autoReviews[i].QRCode < autoReviews[j].QRCode
+	})
 	out["autoReviews"] = autoReviews
 	reviews := rec.reviews
 	if reviews == nil {
@@ -906,29 +943,21 @@ func (a *app) readWorklists(w http.ResponseWriter, r *http.Request) {
 	httputilx.WriteJSON(w, 200, map[string]any{"env": scope, "worklists": out})
 }
 
-// summarize marks a review batch with a refused entry as a warning in the
-// journal: KYC6 answers such a batch 200 all the same.
-func summarize(c *activity.Call) (string, map[string]string) {
-	if c.Status != 200 || !strings.HasSuffix(c.Request.URL.Path, "reviews") {
-		return "", nil
-	}
-	var answer struct {
-		HasErrors bool `json:"hasErrors"`
-		Results   []struct {
-			StatusCode int `json:"statusCode"`
-		} `json:"results"`
-	}
-	if json.Unmarshal(c.RespBody, &answer) != nil || !answer.HasErrors {
-		return "", nil
-	}
-	refused := 0
-	for _, result := range answer.Results {
-		if result.StatusCode < 200 || result.StatusCode > 299 {
-			refused++
+// decodeBody reads a vendor body into v: any field, but exactly one JSON
+// value of the right shape. An empty body, one that does not decode, or
+// one with anything after the value is the caller's 400, as at KYC6.
+func decodeBody(r *http.Request, v any) error {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(v); err != nil {
+		if errors.Is(err, io.EOF) {
+			return errors.New("a JSON body is required")
 		}
+		return err
 	}
-	c.Refused = fmt.Sprintf("%d of %d refused", refused, len(answer.Results))
-	return "", nil
+	if err := decoder.Decode(&json.RawMessage{}); !errors.Is(err, io.EOF) {
+		return errors.New("the body must hold one JSON value and nothing after it")
+	}
+	return nil
 }
 
 func iso(t time.Time) string { return t.UTC().Format(time.RFC3339) }

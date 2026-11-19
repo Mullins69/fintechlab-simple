@@ -29,11 +29,10 @@ func newApp(addr string) (*app, error) {
 	a := &app{monitoring: map[string]*monitorEnv{}}
 	sim, err := vendorsim.New(vendorsim.Config{
 		Service: "kyc6", Simulates: "KYC6",
-		Checks:    []vendorsim.Check{{Name: checkScreening, Outcomes: []string{"clear", "hit"}}},
-		Kept:      []string{"worklists"},
-		Reset:     a.resetMonitoring,
-		Forget:    a.forget,
-		Summarize: summarize,
+		Checks: []vendorsim.Check{{Name: checkScreening, Outcomes: []string{"clear", "hit"}}},
+		Kept:   []string{"worklists"},
+		Reset:  a.resetMonitoring,
+		Forget: a.forget,
 	}, addr)
 	if err != nil {
 		return nil, err
