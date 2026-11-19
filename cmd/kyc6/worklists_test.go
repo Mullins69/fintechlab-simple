@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/webduvet/fintechlab-simple/internal/labclock"
 	"github.com/webduvet/fintechlab-simple/internal/vendorsim/vendorsimtest"
 )
 
@@ -528,5 +529,72 @@ func TestARecordKeepsTheNewestReviews(t *testing.T) {
 	}
 	if first, last := reviews[0].(map[string]any), reviews[len(reviews)-1].(map[string]any); first["referenceId"] != "44" || last["referenceId"] != "99" {
 		t.Errorf("kept from %v to %v, want the newest: the first batch's 44 to the second's 99", first["referenceId"], last["referenceId"])
+	}
+}
+
+func TestMonitoringTimestampsAreOnTheLabClock(t *testing.T) {
+	labclock.Set(72 * time.Hour)
+	defer labclock.Set(0)
+	svc, ctl := surfaces(t)
+	enrol(t, svc, defaultKey)
+	_, armed := vendorsimtest.Call(t, ctl, "POST", armCompany, `{}`, nil)
+	qrCode := vendorsimtest.At(armed, "match.qrCode").(string)
+	vendorsimtest.Call(t, svc, "PUT", companyPath+"/matches/reviews", `{"reviews":[{"qrCode":"`+qrCode+`","referenceId":"1","status":"false-positive"}]}`, defaultKey)
+
+	onLabClock := func(what string, value any) {
+		t.Helper()
+		at, err := time.Parse(time.RFC3339, fmt.Sprint(value))
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if drift := labclock.Now().Sub(at); drift < 0 || drift > time.Minute {
+			t.Errorf("%s = %s, want the lab clock's %s, not the wall clock", what, at, labclock.Now().Format(time.RFC3339))
+		}
+	}
+	_, worklist := vendorsimtest.Call(t, svc, "GET", worklistPath, "", defaultKey)
+	onLabClock("worklist createdDateTimeISO", worklist["createdDateTimeISO"])
+	onLabClock("worklist lastUpdatedDateTimeISO", worklist["lastUpdatedDateTimeISO"])
+	_, list := records(t, svc, worklistPath+"/businesses", defaultKey)
+	company := list[0].(map[string]any)
+	onLabClock("record createdDateTimeISO", company["createdDateTimeISO"])
+	onLabClock("record lastUpdatedDateTimeISO", company["lastUpdatedDateTimeISO"])
+	m := matchesOf(t, svc, companyPath, defaultKey)[0].(map[string]any)
+	onLabClock("match lastReviewDateTimeISO", m["lastReviewDateTimeISO"])
+}
+
+func TestAQRCodeOrResourceIDAnotherMatchHasIsRefused(t *testing.T) {
+	svc, ctl := surfaces(t)
+	enrol(t, svc, defaultKey)
+	arm := func(path, body string, want int) {
+		t.Helper()
+		if code, out := vendorsimtest.Call(t, ctl, "POST", path, body, nil); code != want {
+			t.Errorf("arm %s %s: %d %v, want %d", path, body, code, out, want)
+		}
+	}
+	armOwner := "/sim/kyc6/worklists/wl-7/individuals/owner-42-3/matches"
+	arm(armCompany, `{"resourceId":"r-1","qrCode":"Q1"}`, 201)
+	arm(armCompany, `{"resourceId":"r-2","qrCode":"Q1"}`, 409)
+	arm(armOwner, `{"qrCode":"Q1"}`, 409)
+	arm(armOwner, `{"resourceId":"r-1"}`, 409)
+	arm(armCompany, `{"resourceId":"r-1","qrCode":"Q1"}`, 200)
+
+	if got := matchesOf(t, svc, companyPath, defaultKey); len(got) != 1 {
+		t.Fatalf("a refused arm puts no match: %v", got)
+	}
+	vendorsimtest.Call(t, svc, "PUT", companyPath+"/matches/reviews", `{"reviews":[{"qrCode":"Q1","referenceId":"1","status":"false-positive"}]}`, defaultKey)
+	if _, open := records(t, svc, worklistPath+"/businesses?status=open", defaultKey); len(open) != 0 {
+		t.Errorf("reviewing Q1 closes the record: %v", open)
+	}
+}
+
+func TestANumericReviewIDComesBackWithEveryDigit(t *testing.T) {
+	svc, ctl := surfaces(t)
+	enrol(t, svc, defaultKey)
+	vendorsimtest.Call(t, ctl, "POST", armCompany, `{"qrCode":"9007199254740993"}`, nil)
+
+	_, out := vendorsimtest.Call(t, svc, "PUT", companyPath+"/matches/reviews", `{"reviews":[{"qrCode":9007199254740993,"referenceId":9007199254740993,"status":"false-positive"}]}`, defaultKey)
+	result := out["results"].([]any)[0].(map[string]any)
+	if result["referenceId"] != "9007199254740993" || result["statusCode"] != float64(200) {
+		t.Errorf("a numeric qrCode and referenceId above 2^53: %v, want 9007199254740993 echoed and the match reviewed", result)
 	}
 }

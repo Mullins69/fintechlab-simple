@@ -6,12 +6,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"sync"
 
 	"github.com/webduvet/fintechlab-simple/internal/httputilx"
+	"github.com/webduvet/fintechlab-simple/internal/labclock"
 	"github.com/webduvet/fintechlab-simple/internal/tenant"
 	"github.com/webduvet/fintechlab-simple/internal/vendorsim"
 )
@@ -49,6 +51,7 @@ func newApp(addr string) (*app, error) {
 
 func main() {
 	addr := vendorsim.Listen(":8092")
+	labclock.FollowEnv(context.Background(), "kyc6")
 	a, err := newApp(addr)
 	if err != nil {
 		log.Fatalf("kyc6: %v", err)

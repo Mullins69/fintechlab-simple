@@ -25,6 +25,7 @@ import (
 
 	"github.com/webduvet/fintechlab-simple/internal/activity"
 	"github.com/webduvet/fintechlab-simple/internal/httputilx"
+	"github.com/webduvet/fintechlab-simple/internal/labclock"
 	"github.com/webduvet/fintechlab-simple/internal/tenant"
 	"github.com/webduvet/fintechlab-simple/internal/vendorsim"
 )
@@ -238,7 +239,7 @@ func (a *app) putWorklist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("worklistId")
-	now := time.Now().UTC()
+	now := labclock.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	m := a.monitorIn(tenant.Of(r.Context()))
@@ -370,7 +371,7 @@ func (a *app) putRecord(kind string) http.HandlerFunc {
 			httputilx.Error(w, 400, "name is required")
 			return
 		}
-		now := time.Now().UTC()
+		now := labclock.Now()
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		m := a.monitorIn(tenant.Of(r.Context()))
@@ -613,7 +614,7 @@ func (a *app) reviewMatches(kind, endpoint string) http.HandlerFunc {
 			httputilx.Error(w, 400, field+" is required: a list of at least one entry")
 			return
 		}
-		now := time.Now().UTC()
+		now := labclock.Now()
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		_, rec, missing := a.findRecord(tenant.Of(r.Context()), r.PathValue("worklistId"), kind, r.PathValue("recordId"))
@@ -751,7 +752,7 @@ func (a *app) armMatch(kind string) http.HandlerFunc {
 			}
 		}
 		worklistID, recordID := r.PathValue("worklistId"), r.PathValue("recordId")
-		now := time.Now().UTC()
+		now := labclock.Now()
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		_, rec, missing := a.findRecord(env, worklistID, kind, recordID)
@@ -759,7 +760,11 @@ func (a *app) armMatch(kind string) http.HandlerFunc {
 			httputilx.Error(w, 404, missing+" in environment "+env)
 			return
 		}
-		m, created := a.monitorIn(env).arm(rec, body, now)
+		m, created, conflict := a.monitorIn(env).arm(rec, body, now)
+		if conflict != "" {
+			httputilx.Error(w, 409, conflict+" in environment "+env)
+			return
+		}
 		code := 200
 		if created {
 			code = 201
@@ -773,7 +778,9 @@ func (a *app) armMatch(kind string) http.HandlerFunc {
 
 // arm puts body's match on rec, or moves the one it names on a version, and
 // reports whether it is new. A held auto-review for its qrCode closes it.
-func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool) {
+// It changes nothing and says why when body gives a resourceId or qrCode
+// another match in the environment has.
+func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool, string) {
 	var found *match
 	if body.ResourceID != "" {
 		for _, existing := range rec.matches {
@@ -782,6 +789,9 @@ func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool
 				break
 			}
 		}
+	}
+	if conflict := m.conflict(found, body); conflict != "" {
+		return nil, false, conflict
 	}
 	created := found == nil
 	if created {
@@ -821,7 +831,26 @@ func (m *monitorEnv) arm(rec *record, body armBody, now time.Time) (*match, bool
 		found.close(held)
 	}
 	rec.updated = now
-	return found, created
+	return found, created, ""
+}
+
+// conflict is why body cannot arm found (nil for a new match), or "": a
+// resourceId or qrCode it gives that a different match in the environment
+// has. A review finds its match by qrCode and a profile by resourceId, so a
+// second match with either could never be reviewed or looked up.
+func (m *monitorEnv) conflict(found *match, body armBody) string {
+	for _, existing := range m.matches() {
+		if existing == found {
+			continue
+		}
+		if body.ResourceID != "" && existing.resourceID == body.ResourceID {
+			return "resourceId " + body.ResourceID + " is already a match on another record"
+		}
+		if body.QRCode != "" && existing.qrCode == body.QRCode {
+			return "qrCode " + body.QRCode + " is already match " + existing.resourceID + "'s"
+		}
+	}
+	return ""
 }
 
 // nextFreeNumber moves the environment's match count on to the next n
@@ -840,18 +869,25 @@ func (m *monitorEnv) nextFreeNumber() int {
 // used reports whether a match in the environment has value as its
 // resourceId or its qrCode.
 func (m *monitorEnv) used(value string) bool {
-	for _, wl := range m.worklists {
-		for _, kind := range recordKinds {
-			for _, rec := range wl.records[kind] {
-				for _, existing := range rec.matches {
-					if existing.resourceID == value || existing.qrCode == value {
-						return true
-					}
-				}
-			}
+	for _, existing := range m.matches() {
+		if existing.resourceID == value || existing.qrCode == value {
+			return true
 		}
 	}
 	return false
+}
+
+// matches is every match on every record in the environment.
+func (m *monitorEnv) matches() []*match {
+	var out []*match
+	for _, wl := range m.worklists {
+		for _, kind := range recordKinds {
+			for _, rec := range wl.records[kind] {
+				out = append(out, rec.matches...)
+			}
+		}
+	}
+	return out
 }
 
 // readRecord is GET /sim/kyc6/worklists/{worklistId}/{kind}/{recordId}: the
@@ -945,9 +981,12 @@ func (a *app) readWorklists(w http.ResponseWriter, r *http.Request) {
 
 // decodeBody reads a vendor body into v: any field, but exactly one JSON
 // value of the right shape. An empty body, one that does not decode, or
-// one with anything after the value is the caller's 400, as at KYC6.
+// one with anything after the value is the caller's 400, as at KYC6. A
+// number it keeps as sent (json.Number), so a review's numeric referenceId
+// or qrCode comes back with every digit, however large.
 func decodeBody(r *http.Request, v any) error {
 	decoder := json.NewDecoder(r.Body)
+	decoder.UseNumber()
 	if err := decoder.Decode(v); err != nil {
 		if errors.Is(err, io.EOF) {
 			return errors.New("a JSON body is required")

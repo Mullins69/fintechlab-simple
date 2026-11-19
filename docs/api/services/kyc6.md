@@ -21,7 +21,7 @@ persisted.
 | Auth | an `x-api-key` header on every route. Any non-empty credential is accepted: an environment's own login makes the call that environment's, and any other is the default environment's ([Environments](#environments)). A customer's username with another password is `401`. `/health` and `/sim/*`: none. The control port has none: it takes calls from anything that can reach it, or only from `SIM_CONTROL_ALLOW` (addresses or CIDRs) when that is set |
 | A platform points here with | `KYC6_API_BASE_URL` and `KYC6_MONITOR_API_BASE_URL` (both `http://127.0.0.1:8092/kyc6`), `KYC6_API_KEY`. The lab API hands these out at `GET :8097/v1/connect/env/kyc6` |
 | Activity logs | `GET /sim/activity`: the request journal, every vendor request and its answer, and the traps log |
-| Configuration | `LISTEN` (`:8092`).<br>`SIM_CONTROL_LISTEN` (`LISTEN`'s port plus 1000, `:9092`) and `SIM_CONTROL_ALLOW` (empty: any caller): the control port.<br>Nothing else: no lab clock, no state file. The outcomes and worklists, per environment, every issued token and the customers live in memory and reset on restart; the lab API pushes the customers again |
+| Configuration | `LISTEN` (`:8092`).<br>`SIM_CONTROL_LISTEN` (`LISTEN`'s port plus 1000, `:9092`) and `SIM_CONTROL_ALLOW` (empty: any caller): the control port.<br>`LAB_CLOCK_URL` (compose: `http://clock:8096/clock`): every monitoring timestamp (`createdDateTimeISO`, `lastUpdatedDateTimeISO`, `lastReviewDateTimeISO`, a review's `at`) follows the [lab clock](../../plugins.md#the-clock).<br>Nothing else: no state file. The outcomes and worklists, per environment, every issued token and the customers live in memory and reset on restart; the lab API pushes the customers again |
 | Design record | [integration/verification-vendor-edge.md](../../integration/verification-vendor-edge.md), the package comments in `cmd/kyc6` and `internal/vendorsim`, [catalogue.md](../../catalogue.md) |
 
 ## Environments
@@ -120,6 +120,8 @@ restart loses them, and a flow reset keeps the worklists but clears
 their records ([`POST /sim/reset`](#post-simreset)). Enrolling a record on
 a worklist the environment does not have creates it, with no settings, so
 the platform's enrolments still answer after a restart or an `all` reset.
+
+Timestamps are RFC 3339 UTC on the lab clock.
 
 The lab does not re-screen. A record has no match until a test puts one
 on it with
@@ -275,7 +277,10 @@ A reviewer's decisions on the record's matches.
 Each entry is ruled on alone. One whose `qrCode` names a match on the
 record closes it with `status` (`true-positive` or `false-positive`); a
 match already reviewed takes the newer review. The batch answers `200`,
-with one result per entry, in order, echoing its `referenceId`:
+with one result per entry, in order, echoing its `referenceId`. A
+`qrCode` or `referenceId` sent as a JSON number is read as its digits,
+every one of them however large (`9007199254740993` is
+`"9007199254740993"`):
 
 ```json
 {"hasErrors": true, "results": [
@@ -434,7 +439,13 @@ the record's matches show it:
 
 `400` for an unknown field, a `score` outside 0 to 100, an empty dataset,
 or `env=*`; `404` for an environment this service was never given, or a
-worklist or record that environment does not have.
+worklist or record that environment does not have. `409`, changing
+nothing, for a `qrCode` another match in the environment has (codes are
+unique across the environment; on one record, a review finds its match by
+`qrCode`, so a second match with the same code could never be reviewed),
+or a `resourceId` a match on another record has (a profile is looked up
+by it): `{"error": "qrCode Q1 is already match r-1's in environment default", "status": 409}`.
+A re-arm of a match with its own `qrCode` is not a conflict.
 
 ### `POST /sim/kyc6/worklists/{worklistId}/individuals/{recordId}/matches`
 

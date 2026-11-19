@@ -21,13 +21,13 @@ package vendorsim
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -494,11 +494,13 @@ func Str(v any) string {
 	return str
 }
 
-// StrOrNumber is v as a string, a JSON number as one ("11" for 11), or "":
-// for vendor fields that clients send either way, such as KYC6's review ids.
+// StrOrNumber is v as a string, a JSON number as its digits ("11" for 11),
+// or "": for vendor fields that clients send either way, such as KYC6's
+// review ids. The body must be decoded with json.Decoder.UseNumber: a
+// number read as a float64 has lost its digits past 2^53, and is "".
 func StrOrNumber(v any) string {
-	if number, ok := v.(float64); ok {
-		return strconv.FormatFloat(number, 'f', -1, 64)
+	if number, ok := v.(json.Number); ok {
+		return number.String()
 	}
 	return Str(v)
 }
