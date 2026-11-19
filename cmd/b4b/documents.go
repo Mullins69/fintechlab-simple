@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/md5"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -131,7 +130,7 @@ func (a *app) createUploadSlot(w http.ResponseWriter, r *http.Request) {
 		httputilx.Error(w, 400, err.Error())
 		return
 	}
-	doc, err := a.dir.In(envOf(r)).AddUploadSlot(r.PathValue("id"), p, uploadToken(), maxUploadBytes)
+	doc, err := a.dir.In(envOf(r)).AddUploadSlot(r.PathValue("id"), p, b4b.RandomHex(16), maxUploadBytes)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -179,28 +178,22 @@ func (a *app) receiveUpload(w http.ResponseWriter, r *http.Request) {
 // scheme, host and path prefix, preferring what a proxy in front says. A
 // proxy that serves b4b under a path (https://lab.example/b4b) and strips
 // it on the way in names it in X-Forwarded-Prefix; without one there is no
-// prefix, since this listener's routes sit at the root.
+// prefix, since this listener's routes sit at the root. Behind a chain of
+// proxies each header is a list, and the first entry is the client's.
 func requestBase(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+	if r.TLS != nil || httputilx.Forwarded(r, "X-Forwarded-Proto") == "https" {
 		scheme = "https"
 	}
-	host := r.Header.Get("X-Forwarded-Host")
+	host := httputilx.Forwarded(r, "X-Forwarded-Host")
 	if host == "" {
 		host = r.Host
 	}
-	prefix, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Prefix"), ",")
-	prefix = strings.Trim(strings.TrimSpace(prefix), "/")
+	prefix := strings.Trim(httputilx.Forwarded(r, "X-Forwarded-Prefix"), "/")
 	if prefix != "" {
 		prefix = "/" + prefix
 	}
 	return scheme + "://" + host + prefix
-}
-
-func uploadToken() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }
 
 func (a *app) getDocument(w http.ResponseWriter, r *http.Request) {

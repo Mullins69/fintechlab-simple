@@ -120,7 +120,7 @@ func (c Company) vendor() *Company {
 // its upload URL.
 func (doc Document) vendor() *Document { doc.Env = ""; doc.UploadToken = ""; return &doc }
 
-func defaultID(prefix string) string { return prefix + "_" + shortHex() }
+func defaultID(prefix string) string { return prefix + "_" + RandomHex(6) }
 
 func now() string { return labclock.Now().Format(time.RFC3339) }
 

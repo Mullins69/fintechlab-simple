@@ -581,12 +581,14 @@ type PersonParams struct {
 }
 
 // normalized is p with the gateway's type and name folded into entity_type
-// and legal_name, where those are empty.
+// and legal_name, where those are empty. The gateway's name is a legal
+// entity's name only: a natural person is named by first_name and
+// last_name, and has no legal_name.
 func (p PersonParams) normalized() PersonParams {
 	if p.EntityType == "" {
 		p.EntityType = p.Type
 	}
-	if p.LegalName == "" {
+	if p.LegalName == "" && p.EntityType == EntityLegalEntity {
 		p.LegalName = p.Name
 	}
 	p.Type, p.Name = "", ""

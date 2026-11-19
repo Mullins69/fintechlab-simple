@@ -355,7 +355,9 @@ With a document on file the gateway adds `document_type`
 
 Field by field: `type` is the entity type (default `natural_person`;
 earlier spelling `entity_type`); `name` is a legal entity's name (earlier
-spelling `legal_name`, optionally with `registered_company_no`); `role`
+spelling `legal_name`, optionally with `registered_company_no`); a
+natural person's `name` is discarded, as a natural person is named by
+`first_name` and `last_name`; `role`
 (`key_individual` or `shareholder`), `positions_within_business`,
 `telephone_number` and `countries_of_citizenship` are kept as sent.
 `address_id` must name one of the company's addresses. `callback_url` is
@@ -558,7 +560,8 @@ Answers `201` with the slot, which is all the gateway reads:
 listener as the caller reached it (`X-Forwarded-Proto`,
 `X-Forwarded-Host` and `X-Forwarded-Prefix` are honoured: a proxy serving
 b4b under `https://lab.example/b4b` that strips `/b4b` and sends it as
-`X-Forwarded-Prefix` gets `https://lab.example/b4b/direct-uploads/…`), so
+`X-Forwarded-Prefix` gets `https://lab.example/b4b/direct-uploads/…`;
+behind a chain of proxies each header's first entry is used), so
 it is reachable from wherever the create was. `400` for a missing or malformed field, `404` for an unknown
 company. Persisted, so a slot survives a restart.
 

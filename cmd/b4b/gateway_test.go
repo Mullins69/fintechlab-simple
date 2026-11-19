@@ -476,31 +476,40 @@ func TestTheGatewaysDocumentUploadIsASlotAndAPut(t *testing.T) {
 
 // A client that reaches b4b under a path prefix, through a proxy that
 // strips it and names it in X-Forwarded-Prefix, gets a slot URL under the
-// same prefix.
+// same prefix. Behind a chain of proxies each forwarded header is a list,
+// and the first entry is the one the client used.
 func TestAnUploadSlotURLKeepsTheCallersPathPrefix(t *testing.T) {
-	lab := newGatewayLab(t)
-	companyID := lab.call(t, "POST", "/oversight/v1/companies", gatewayCreateCompany, 201)["id"].(string)
-	req, err := http.NewRequest("POST", lab.l.vendor.URL+"/oversight/v1/companies/"+companyID+"/uploads",
-		strings.NewReader(`{"filename": "x.pdf", "byte_size": 3, "checksum": "rL0Y20zC+Fzt72VPzMSk2A==", "content_type": "application/pdf"}`))
-	if err != nil {
-		t.Fatal(err)
+	cases := map[string]struct{ host, proto, prefix string }{
+		"one proxy":   {host: "lab.example", proto: "https", prefix: "/b4b/"},
+		"two proxies": {host: "lab.example, b4b", proto: "https,http", prefix: "/b4b, /x"},
 	}
-	req.Header.Set("Authorization", "Bearer "+lab.token)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Forwarded-Host", "lab.example")
-	req.Header.Set("X-Forwarded-Proto", "https")
-	req.Header.Set("X-Forwarded-Prefix", "/b4b/")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	b, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != 201 {
-		t.Fatalf("slot create = %d %s", resp.StatusCode, b)
-	}
-	url, _ := object(t, b)["url"].(string)
-	if !strings.HasPrefix(url, "https://lab.example/b4b"+uploadPath) {
-		t.Fatalf("slot url = %q, want it under https://lab.example/b4b", url)
+	for name, forwarded := range cases {
+		t.Run(name, func(t *testing.T) {
+			lab := newGatewayLab(t)
+			companyID := lab.call(t, "POST", "/oversight/v1/companies", gatewayCreateCompany, 201)["id"].(string)
+			req, err := http.NewRequest("POST", lab.l.vendor.URL+"/oversight/v1/companies/"+companyID+"/uploads",
+				strings.NewReader(`{"filename": "x.pdf", "byte_size": 3, "checksum": "rL0Y20zC+Fzt72VPzMSk2A==", "content_type": "application/pdf"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+lab.token)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-Forwarded-Host", forwarded.host)
+			req.Header.Set("X-Forwarded-Proto", forwarded.proto)
+			req.Header.Set("X-Forwarded-Prefix", forwarded.prefix)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != 201 {
+				t.Fatalf("slot create = %d %s", resp.StatusCode, b)
+			}
+			url, _ := object(t, b)["url"].(string)
+			if !strings.HasPrefix(url, "https://lab.example/b4b"+uploadPath) {
+				t.Fatalf("slot url = %q, want it under https://lab.example/b4b", url)
+			}
+		})
 	}
 }

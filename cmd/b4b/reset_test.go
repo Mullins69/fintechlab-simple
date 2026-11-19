@@ -56,7 +56,7 @@ func testApp(t *testing.T, cb, bc *peer, statePath string, delay time.Duration) 
 		t.Fatal(err)
 	}
 	a := &app{
-		beneficiaries: b4b.NewBeneficiaryStore(func() string { return "ben_" + shortID() }),
+		beneficiaries: b4b.NewBeneficiaryStore(func() string { return "ben_" + b4b.RandomHex(6) }),
 		dir:           b4b.NewDirectory(nil),
 		kid:           "b4b-test",
 		client:        &http.Client{Timeout: 2 * time.Second},

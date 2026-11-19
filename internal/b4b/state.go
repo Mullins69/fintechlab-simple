@@ -305,10 +305,12 @@ func (e *Engine) Restore(s State) (held []Payment) {
 	return held
 }
 
-func shortHex() string {
-	var b [6]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
+// RandomHex is n random bytes as lowercase hex: 2n characters. Every id
+// and secret b4b mints that is not a UUID is one.
+func RandomHex(n int) string {
+	b := make([]byte, n)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 func sortByCreated[T any](items []T, key func(T) string) {

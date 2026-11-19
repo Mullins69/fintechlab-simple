@@ -514,3 +514,32 @@ func TestAnAddressRepostChangingOnlyExtraUpdatesIt(t *testing.T) {
 		}
 	}
 }
+
+// The gateway's name is a legal entity's name. A natural person is named by
+// first_name and last_name, so a name sent with one is not a legal_name.
+func TestPersonNameIsALegalNameOnlyForALegalEntity(t *testing.T) {
+	d := NewDirectory(nil)
+	params := gbCompany()
+	params.PersonDocumentsWaived = true
+	c, err := d.CreateCompany(params)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	natural, err := d.AddPerson(c.ID, PersonParams{
+		Type: EntityNaturalPerson, Name: "Jane Doe",
+		FirstName: "Jane", LastName: "Doe", DateOfBirth: "1990-01-01",
+	})
+	if err != nil {
+		t.Fatalf("natural person: %v", err)
+	}
+	if natural.LegalName != "" {
+		t.Errorf("a natural person got legal_name %q", natural.LegalName)
+	}
+	entity, err := d.AddPerson(c.ID, PersonParams{Type: EntityLegalEntity, Name: "Holdco Ltd"})
+	if err != nil {
+		t.Fatalf("legal entity: %v", err)
+	}
+	if entity.LegalName != "Holdco Ltd" {
+		t.Errorf("a legal entity's legal_name = %q, want Holdco Ltd", entity.LegalName)
+	}
+}

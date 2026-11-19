@@ -28,7 +28,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,7 +138,7 @@ func main() {
 	}
 
 	a := &app{
-		beneficiaries:  b4b.NewBeneficiaryStore(func() string { return "ben_" + shortID() }),
+		beneficiaries:  b4b.NewBeneficiaryStore(func() string { return "ben_" + b4b.RandomHex(6) }),
 		dir:            b4b.NewDirectory(nil),
 		pubKey:         pub,
 		kid:            kid,
@@ -578,12 +577,6 @@ func statePathLabel(p string) string {
 		return "(disabled, in-memory only)"
 	}
 	return p
-}
-
-func shortID() string {
-	var b [6]byte
-	_, _ = rand.Read(b[:])
-	return hex.EncodeToString(b[:])
 }
 
 // paymentID is a UUIDv4, because that is what a client validates it as: the
